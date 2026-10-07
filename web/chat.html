@@ -1,343 +1,592 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0">
+
     <title>SecureChat</title>
 
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <link
+        rel="stylesheet"
+        href="/static/style.css">
 
+    <!-- Small additions for the remove-member and leave-group buttons -->
     <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            font-family: Arial, sans-serif;
-        }
-
-        body {
-            background: #0f172a;
-            color: white;
-            height: 100vh;
-            overflow: hidden;
-        }
-
-        .container {
-            display: flex;
-            height: 100vh;
-        }
-
-        /* SIDEBAR */
-
-        .sidebar {
-            width: 280px;
-            background: #111827;
-            border-right: 1px solid #273449;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .sidebar-header {
-            padding: 20px;
-            border-bottom: 1px solid #273449;
-        }
-
-        .sidebar-header h2 {
-            color: #38bdf8;
-            margin-bottom: 5px;
-        }
-
-        .sidebar-header p {
-            color: #94a3b8;
-            font-size: 14px;
-        }
-
-        .section-title {
-            padding: 15px 20px 8px;
-            color: #64748b;
+        .member-remove {
+            margin-left: auto;
+            padding: 6px 12px;
+            border: 1px solid rgba(239, 68, 68, 0.6);
+            border-radius: 8px;
+            background: transparent;
+            color: #ef4444;
             font-size: 12px;
-            text-transform: uppercase;
-            font-weight: bold;
-        }
-
-        .users {
-            overflow-y: auto;
-            flex: 1;
-        }
-
-        .user {
-            padding: 13px 20px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            transition: 0.2s;
-        }
-
-        .user:hover {
-            background: #1e293b;
-        }
-
-        .user.active {
-            background: #1e3a5f;
-        }
-
-        .status {
-            width: 10px;
-            height: 10px;
-            background: #22c55e;
-            border-radius: 50%;
-        }
-
-        .user-name {
-            font-size: 15px;
-        }
-
-        /* GROUPS */
-
-        .groups {
-            max-height: 200px;
-            overflow-y: auto;
-        }
-
-        .group {
-            padding: 10px 20px;
-            cursor: pointer;
-            color: #cbd5e1;
-        }
-
-        .group:hover {
-            background: #1e293b;
-        }
-
-        /* MAIN CHAT */
-
-        .chat {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .chat-header {
-            height: 70px;
-            background: #111827;
-            border-bottom: 1px solid #273449;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 25px;
-        }
-
-        .chat-user {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .chat-user h3 {
-            font-size: 17px;
-        }
-
-        .chat-user span {
-            color: #22c55e;
-            font-size: 12px;
-        }
-
-        .logout {
-            background: #ef4444;
-            color: white;
-            border: none;
-            padding: 9px 16px;
-            border-radius: 6px;
+            font-weight: 600;
             cursor: pointer;
         }
 
-        .logout:hover {
-            background: #dc2626;
+        .member-remove:hover {
+            background: rgba(239, 68, 68, 0.12);
         }
 
-        /* MESSAGES */
-
-        .messages {
-            flex: 1;
-            padding: 25px;
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
+        .leave-section {
+            margin-top: 18px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(148, 163, 184, 0.25);
         }
 
-        .empty {
-            margin: auto;
-            text-align: center;
-            color: #64748b;
-        }
-
-        .empty h2 {
-            margin-bottom: 8px;
-        }
-
-        .message {
-            max-width: 65%;
+        .leave-btn {
+            width: 100%;
             padding: 10px 14px;
+            border: 1px solid rgba(239, 68, 68, 0.6);
             border-radius: 10px;
-            word-wrap: break-word;
-        }
-
-        .message.sent {
-            align-self: flex-end;
-            background: #0284c7;
-            border-bottom-right-radius: 2px;
-        }
-
-        .message.received {
-            align-self: flex-start;
-            background: #1e293b;
-            border-bottom-left-radius: 2px;
-        }
-
-        .message-user {
-            font-size: 11px;
-            color: #94a3b8;
-            margin-bottom: 4px;
-        }
-
-        .message-text {
-            font-size: 15px;
-        }
-
-        /* INPUT */
-
-        .input-area {
-            padding: 15px 20px;
-            background: #111827;
-            border-top: 1px solid #273449;
-            display: flex;
-            gap: 10px;
-        }
-
-        .input-area input {
-            flex: 1;
-            background: #1e293b;
-            border: 1px solid #334155;
-            color: white;
-            padding: 13px;
-            border-radius: 7px;
-            outline: none;
-        }
-
-        .input-area input:focus {
-            border-color: #38bdf8;
-        }
-
-        .send-btn {
-            background: #0284c7;
-            color: white;
-            border: none;
-            padding: 0 22px;
-            border-radius: 7px;
+            background: transparent;
+            color: #ef4444;
+            font-weight: 600;
             cursor: pointer;
-            font-weight: bold;
         }
 
-        .send-btn:hover {
-            background: #0369a1;
-        }
-
-        /* MOBILE */
-
-        @media (max-width: 700px) {
-            .sidebar {
-                width: 210px;
-            }
-
-            .message {
-                max-width: 80%;
-            }
+        .leave-btn:hover {
+            background: rgba(239, 68, 68, 0.12);
         }
     </style>
+
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 
-<body>
+<body class="chat-page">
 
-<div class="container">
+<div class="app">
 
-    <!-- SIDEBAR -->
+    <!-- =====================================================
+         SIDEBAR
+         ===================================================== -->
 
-    <div class="sidebar">
+    <aside class="sidebar">
 
-        <div class="sidebar-header">
-            <h2>SecureChat</h2>
-            <p id="loggedUser">Connecting...</p>
-        </div>
+        <!-- BRAND -->
 
-        <div class="section-title">
-            Online Users
-        </div>
+        <div class="sidebar-brand">
 
-        <div class="users" id="usersList">
-            <div class="empty">
-                Loading users...
-            </div>
-        </div>
-
-        <div class="section-title">
-            Groups
-        </div>
-
-        <div class="groups" id="groupsList">
-        </div>
-
-    </div>
-
-
-    <!-- CHAT -->
-
-    <div class="chat">
-
-        <div class="chat-header">
-
-            <div class="chat-user">
-                <div>
-                    <h3 id="chatTitle">Select a user</h3>
-                    <span id="chatStatus"></span>
-                </div>
+            <div class="brand-icon small">
+                🔐
             </div>
 
-            <button class="logout" onclick="logout()">
-                Logout
+            <div>
+                <h2>
+                    SecureChat
+                </h2>
+
+                <span>
+                    TCP Network
+                </span>
+            </div>
+
+        </div>
+
+
+        <!-- CURRENT USER -->
+
+        <div class="current-user">
+
+            <div
+                class="avatar"
+                id="myAvatar">
+
+                U
+
+            </div>
+
+            <div class="user-info">
+
+                <strong id="currentUsername">
+                    User
+                </strong>
+
+                <span class="online-status">
+
+                    <i></i>
+
+                    Online
+
+                </span>
+
+            </div>
+
+        </div>
+
+
+        <!-- NAVIGATION -->
+
+        <div class="sidebar-section">
+
+            <div class="section-title">
+                Communication
+            </div>
+
+
+            <!-- USERS -->
+
+            <button
+                class="sidebar-item active"
+                type="button"
+                data-tab="users"
+                onclick="showUsers()">
+
+                <span>
+                    👤
+                </span>
+
+                <span>
+                    Users
+                </span>
+
+                <span
+                    id="onlineCount"
+                    class="count">
+
+                    0
+
+                </span>
+
+            </button>
+
+
+            <!-- GROUPS -->
+
+            <button
+                class="sidebar-item"
+                type="button"
+                data-tab="groups"
+                onclick="showGroups()">
+
+                <span>
+                    👥
+                </span>
+
+                <span>
+                    Groups
+                </span>
+
+                <span
+                    id="groupCount"
+                    class="count">
+
+                    0
+
+                </span>
+
             </button>
 
         </div>
 
 
-        <div class="messages" id="messages">
+        <!-- =================================================
+             USERS PANEL
+             ================================================= -->
 
-            <div class="empty" id="emptyMessage">
-                <h2>Welcome to SecureChat</h2>
-                <p>Select a user to start chatting.</p>
+        <div
+            id="usersPanel"
+            class="sidebar-list">
+
+            <div class="list-heading">
+                Online Users
+            </div>
+
+            <div id="usersList">
+
+                <div class="empty-list">
+                    No users online
+                </div>
+
             </div>
 
         </div>
 
 
-        <div class="input-area">
+        <!-- =================================================
+             GROUPS PANEL
+             ================================================= -->
 
-            <input
-                type="text"
-                id="messageInput"
-                placeholder="Select a user first..."
-                autocomplete="off"
-                disabled
-            >
+        <div
+            id="groupsPanel"
+            class="sidebar-list hidden">
+
+            <div class="list-heading">
+
+                <span>
+                    Groups
+                </span>
+
+                <button
+                    class="add-btn"
+                    type="button"
+                    onclick="openCreateGroup()">
+
+                    +
+
+                </button>
+
+            </div>
+
+            <div id="groupsList">
+
+                <div class="empty-list">
+                    No groups
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             NETWORK STATUS
+             ================================================= -->
+
+        <div class="network-card">
+
+            <div class="network-header">
+
+                <span>
+                    NETWORK
+                </span>
+
+                <span class="network-live">
+                    LIVE
+                </span>
+
+            </div>
+
+
+            <div class="network-row">
+
+                <span>
+                    Status
+                </span>
+
+                <strong id="networkStatus">
+                    Connected
+                </strong>
+
+            </div>
+
+
+            <div class="network-row">
+
+                <span>
+                    Protocol
+                </span>
+
+                <strong>
+                    TCP
+                </strong>
+
+            </div>
+
+
+            <div class="network-row">
+
+                <span>
+                    Clients
+                </span>
+
+                <strong id="networkClients">
+                    0
+                </strong>
+
+            </div>
+
+        </div>
+
+
+        <!-- LOGOUT -->
+
+        <button
+            class="logout-btn"
+            type="button"
+            onclick="logout()">
+
+            <span>
+                ↪
+            </span>
+
+            Logout
+
+        </button>
+
+    </aside>
+
+
+    <!-- =====================================================
+         MAIN
+         ===================================================== -->
+
+    <main class="main">
+
+        <!-- =================================================
+             CHAT HEADER
+             ================================================= -->
+
+        <header class="chat-header">
+
+            <div
+                id="chatHeader"
+                class="chat-header-info">
+
+                <div class="chat-avatar">
+                    💬
+                </div>
+
+                <div>
+
+                    <h2 id="chatTitle">
+                        Select a user
+                    </h2>
+
+                    <p id="chatSubtitle">
+                        Choose someone to start chatting
+                    </p>
+
+                </div>
+
+            </div>
+
+
+            <!-- HEADER ACTIONS -->
+
+            <div class="header-actions">
+
+                <!-- REFRESH -->
+
+                <button
+                    class="icon-btn"
+                    type="button"
+                    title="Refresh"
+                    onclick="refreshData()">
+
+                    ↻
+
+                </button>
+
+
+                <!-- GROUP INFORMATION -->
+
+                <button
+                    id="groupInfoBtn"
+                    class="icon-btn hidden"
+                    type="button"
+                    title="Group information"
+                    onclick="openGroupInfo()">
+
+                    ⓘ
+
+                </button>
+
+            </div>
+
+        </header>
+
+
+        <!-- =================================================
+             WELCOME SCREEN
+             ================================================= -->
+
+        <div
+            id="welcomeScreen"
+            class="welcome-screen">
+
+            <div class="welcome-icon">
+                🔐
+            </div>
+
+            <h1>
+                SecureChat
+            </h1>
+
+            <p>
+                Select a user or group from the sidebar
+                to start a secure conversation.
+            </p>
+
+            <div class="feature-cards">
+
+                <!-- TCP -->
+
+                <div class="feature-card">
+
+                    <div>
+                        🌐
+                    </div>
+
+                    <strong>
+                        TCP Communication
+                    </strong>
+
+                    <span>
+                        Reliable client-server messaging
+                        using TCP sockets.
+                    </span>
+
+                </div>
+
+
+                <!-- MULTI CLIENT -->
+
+                <div class="feature-card">
+
+                    <div>
+                        👥
+                    </div>
+
+                    <strong>
+                        Multi-Client
+                    </strong>
+
+                    <span>
+                        Multiple users connected
+                        simultaneously.
+                    </span>
+
+                </div>
+
+
+                <!-- SECURITY -->
+
+                <div class="feature-card">
+
+                    <div>
+                        🔒
+                    </div>
+
+                    <strong>
+                        Secure
+                    </strong>
+
+                    <span>
+                        Authentication and encrypted
+                        communication.
+                    </span>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             MESSAGES
+             ================================================= -->
+
+        <div
+            id="messagesContainer"
+            class="messages-container hidden">
+
+            <div id="messages">
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             MESSAGE INPUT
+             ================================================= -->
+
+        <div
+            id="messageArea"
+            class="message-area hidden">
+
+            <div class="message-input-wrapper">
+
+                <input
+                    type="text"
+                    id="messageInput"
+                    placeholder="Type your message..."
+                    autocomplete="off"
+                    onkeydown="handleMessageKey(event)">
+
+                <button
+                    class="send-btn"
+                    type="button"
+                    onclick="sendMessage()">
+
+                    ➤
+
+                </button>
+
+            </div>
+
+            <div class="input-hint">
+                Press Enter to send
+            </div>
+
+        </div>
+
+    </main>
+
+</div>
+
+
+<!-- =========================================================
+     CREATE GROUP MODAL
+     ========================================================= -->
+
+<div
+    id="createGroupModal"
+    class="modal hidden">
+
+    <div class="modal-card">
+
+        <div class="modal-header">
+
+            <h2>
+                Create Group
+            </h2>
 
             <button
-                class="send-btn"
-                id="sendButton"
-                onclick="sendMessage()"
-                disabled
-            >
-                Send
+                type="button"
+                onclick="closeCreateGroup()">
+
+                ×
+
+            </button>
+
+        </div>
+
+        <p>
+            Create a new group for multiple users.
+        </p>
+
+        <input
+            id="groupNameInput"
+            type="text"
+            placeholder="Enter group name"
+            autocomplete="off">
+
+        <div class="modal-actions">
+
+            <button
+                class="secondary-btn"
+                type="button"
+                onclick="closeCreateGroup()">
+
+                Cancel
+
+            </button>
+
+            <button
+                class="primary-btn"
+                type="button"
+                onclick="createGroup()">
+
+                Create Group
+
             </button>
 
         </div>
@@ -347,783 +596,148 @@
 </div>
 
 
-<script>
+<!-- =========================================================
+     GROUP INFORMATION MODAL
+     ========================================================= -->
 
-    // =========================
-    // SOCKET CONNECTION
-    // =========================
+<div
+    id="groupInfoModal"
+    class="modal hidden">
 
-    const socket = io();
+    <div class="modal-card group-info-card">
 
-    const currentUsername = sessionStorage.getItem("username");
+        <!-- HEADER -->
 
-    let selectedUser = null;
+        <div class="modal-header">
 
-    console.log("Current user:", currentUsername);
+            <div>
 
+                <h2 id="infoGroupName">
+                    Group
+                </h2>
 
-    // =========================
-    // LOGIN CHECK
-    // =========================
+                <p id="infoGroupMeta">
+                    Group members
+                </p>
 
-    if (!currentUsername) {
-
-        window.location.href = "/";
-
-    } else {
-
-        document.getElementById("loggedUser").textContent =
-            "Logged in as " + currentUsername;
-
-    }
-
-
-    // =========================
-    // SOCKET CONNECT
-    // =========================
-
-    socket.on("connect", function() {
-
-        console.log("Connected to web server");
-
-        console.log("Socket ID:", socket.id);
-
-        /*
-         * IMPORTANT:
-         * The login happened on index.html.
-         *
-         * When index.html redirects to chat.html,
-         * this page gets a new Socket.IO connection.
-         *
-         * So we attach this browser connection
-         * to the existing TCP connection.
-         */
-
-        socket.emit("attach", {
-            username: currentUsername
-        });
-
-    });
-
-
-    // =========================
-    // ATTACH SUCCESS
-    // =========================
-
-    socket.on("attach_success", function(data) {
-
-        console.log(
-            "Attached successfully:",
-            data.username
-        );
-
-        socket.emit("get_users");
-
-        socket.emit("get_groups");
-
-    });
-
-
-    // =========================
-    // ATTACH ERROR
-    // =========================
-
-    socket.on("attach_error", function(data) {
-
-        console.error(
-            "Attach failed:",
-            data.message
-        );
-
-        alert(
-            "Connection error: " +
-            data.message
-        );
-
-        sessionStorage.removeItem("username");
-
-        window.location.href = "/";
-
-    });
-
-
-    // =========================
-    // USERS LIST
-    // =========================
-
-    socket.on("users", function(data) {
-
-        console.log("Users received:", data);
-
-        const usersList =
-            document.getElementById("usersList");
-
-        usersList.innerHTML = "";
-
-        let users = data.users || data;
-
-        if (typeof users === "string") {
-
-            users = users
-                .split("|")
-                .filter(Boolean);
-
-        }
-
-        if (!Array.isArray(users)) {
-
-            console.error(
-                "Invalid users data:",
-                users
-            );
-
-            return;
-
-        }
-
-
-        users.forEach(function(username) {
-
-            if (!username) {
-                return;
-            }
-
-            /*
-             * Don't display yourself
-             */
-
-            if (username === currentUsername) {
-                return;
-            }
-
-
-            const userDiv =
-                document.createElement("div");
-
-            userDiv.className = "user";
-
-            userDiv.dataset.username = username;
-
-            userDiv.innerHTML = `
-                <div class="status"></div>
-                <div class="user-name">
-                    ${escapeHtml(username)}
-                </div>
-            `;
-
-
-            userDiv.onclick = function() {
-
-                selectUser(username);
-
-            };
-
-
-            usersList.appendChild(userDiv);
-
-        });
-
-
-        if (usersList.children.length === 0) {
-
-            usersList.innerHTML = `
-                <div style="
-                    padding:20px;
-                    color:#64748b;
-                    text-align:center;
-                ">
-                    No other users online
-                </div>
-            `;
-
-        }
-
-    });
-
-
-    // =========================
-    // GROUP LIST
-    // =========================
-
-    socket.on("groups", function(data) {
-
-        console.log("Groups received:", data);
-
-        const groupsList =
-            document.getElementById("groupsList");
-
-        groupsList.innerHTML = "";
-
-        let groups = data.groups || data;
-
-        if (typeof groups === "string") {
-
-            groups = groups
-                .split("|")
-                .filter(Boolean);
-
-        }
-
-        if (!Array.isArray(groups)) {
-            return;
-        }
-
-
-        groups.forEach(function(groupName) {
-
-            const groupDiv =
-                document.createElement("div");
-
-            groupDiv.className = "group";
-
-            groupDiv.textContent =
-                "👥 " + groupName;
-
-            groupDiv.onclick = function() {
-
-                selectGroup(groupName);
-
-            };
-
-            groupsList.appendChild(groupDiv);
-
-        });
-
-    });
-
-
-    // =========================
-    // SELECT USER
-    // =========================
-
-    function selectUser(username) {
-
-        selectedUser = username;
-
-        console.log(
-            "Selected user:",
-            username
-        );
-
-
-        document.getElementById("chatTitle")
-            .textContent = username;
-
-        document.getElementById("chatStatus")
-            .textContent = "Online";
-
-
-        document.getElementById("messageInput")
-            .disabled = false;
-
-        document.getElementById("sendButton")
-            .disabled = false;
-
-        document.getElementById("messageInput")
-            .placeholder =
-            "Message " + username + "...";
-
-
-        /*
-         * Remove active class
-         */
-
-        document
-            .querySelectorAll(".user")
-            .forEach(function(element) {
-
-                element.classList.remove("active");
-
-            });
-
-
-        /*
-         * Highlight selected user
-         */
-
-        const selected =
-            document.querySelector(
-                `.user[data-username="${CSS.escape(username)}"]`
-            );
-
-        if (selected) {
-
-            selected.classList.add("active");
-
-        }
-
-
-        /*
-         * Clear messages
-         */
-
-        document.getElementById("messages")
-            .innerHTML = "";
-
-
-        /*
-         * Request chat history
-         */
-
-        socket.emit("get_history", {
-
-            username: username
-
-        });
-
-    }
-
-
-    // =========================
-    // HISTORY
-    // =========================
-
-    socket.on("history", function(data) {
-
-        console.log(
-            "History received:",
-            data
-        );
-
-
-        const messages =
-            document.getElementById("messages");
-
-        messages.innerHTML = "";
-
-
-        let history =
-            data.history || data.messages || data;
-
-
-        if (!Array.isArray(history)) {
-
-            console.log(
-                "History is not an array:",
-                history
-            );
-
-            return;
-
-        }
-
-
-        history.forEach(function(message) {
-
-            let sender =
-                message.sender ||
-                message.from ||
-                "";
-
-            let text =
-                message.message ||
-                message.text ||
-                "";
-
-
-            addMessage(
-                sender,
-                text,
-                sender === currentUsername
-            );
-
-        });
-
-    });
-
-
-    // =========================
-    // RECEIVE MESSAGE
-    // =========================
-
-    socket.on("message", function(data) {
-
-        console.log(
-            "Message received:",
-            data
-        );
-
-
-        const sender =
-            data.sender || data.from;
-
-        const message =
-            data.message || data.text || "";
-
-
-        /*
-         * If we're currently chatting with
-         * this sender, display it.
-         */
-
-        if (
-            selectedUser === sender ||
-            sender === currentUsername
-        ) {
-
-            addMessage(
-                sender,
-                message,
-                sender === currentUsername
-            );
-
-        }
-
-    });
-
-
-    // =========================
-    // SEND MESSAGE
-    // =========================
-
-    function sendMessage() {
-
-        const input =
-            document.getElementById("messageInput");
-
-        const message =
-            input.value.trim();
-
-
-        if (!selectedUser) {
-
-            alert("Please select a user first.");
-
-            return;
-
-        }
-
-
-        if (!message) {
-            return;
-        }
-
-
-        console.log(
-            "Sending message to:",
-            selectedUser
-        );
-
-
-        socket.emit("chat_message", {
-
-            username: currentUsername,
-
-            receiver: selectedUser,
-
-            message: message
-
-        });
-
-
-        /*
-         * Display our own message immediately.
-         */
-
-        addMessage(
-            currentUsername,
-            message,
-            true
-        );
-
-
-        input.value = "";
-
-        input.focus();
-
-    }
-
-
-    // =========================
-    // ENTER TO SEND
-    // =========================
-
-    document
-        .getElementById("messageInput")
-        .addEventListener(
-            "keydown",
-            function(event) {
-
-                if (event.key === "Enter") {
-
-                    event.preventDefault();
-
-                    sendMessage();
-
-                }
-
-            }
-        );
-
-
-    // =========================
-    // ADD MESSAGE
-    // =========================
-
-    function addMessage(
-        sender,
-        text,
-        isSent
-    ) {
-
-        const messages =
-            document.getElementById("messages");
-
-
-        /*
-         * Remove welcome message
-         */
-
-        const empty =
-            document.getElementById("emptyMessage");
-
-        if (empty) {
-            empty.remove();
-        }
-
-
-        const messageDiv =
-            document.createElement("div");
-
-        messageDiv.className =
-            "message " +
-            (isSent ? "sent" : "received");
-
-
-        messageDiv.innerHTML = `
-
-            <div class="message-user">
-                ${escapeHtml(sender)}
             </div>
 
-            <div class="message-text">
-                ${escapeHtml(text)}
+            <button
+                type="button"
+                onclick="closeGroupInfo()">
+
+                ×
+
+            </button>
+
+        </div>
+
+
+        <!-- =================================================
+             ADD MEMBERS
+             ================================================= -->
+
+        <div class="add-member-section">
+
+            <h3>
+                Add Members
+            </h3>
+
+            <div class="member-actions">
+
+                <select id="addMemberSelect">
+
+                    <option value="">
+                        Select a user
+                    </option>
+
+                </select>
+
+                <button
+                    class="primary-btn"
+                    type="button"
+                    onclick="addSelectedMember()">
+
+                    + Add
+
+                </button>
+
             </div>
 
-        `;
+        </div>
 
 
-        messages.appendChild(messageDiv);
+        <!-- =================================================
+             MEMBERS
+             ================================================= -->
 
+        <div class="members-section">
 
-        messages.scrollTop =
-            messages.scrollHeight;
+            <h3>
+                Members
+            </h3>
 
-    }
+            <div
+                id="groupMembersList"
+                class="members-list">
 
+                <div class="empty-list">
+                    No members found
+                </div>
 
-    // =========================
-    // GROUP SELECT
-    // =========================
+            </div>
 
-    function selectGroup(groupName) {
+        </div>
 
-        console.log(
-            "Selected group:",
-            groupName
-        );
 
+        <!-- =================================================
+             LEAVE GROUP
+             ================================================= -->
 
-        selectedUser = null;
+        <div class="leave-section">
 
+            <button
+                id="leaveGroupButton"
+                class="leave-btn"
+                type="button"
+                onclick="leaveGroup()">
 
-        document.getElementById("chatTitle")
-            .textContent =
-            "#" + groupName;
+                Leave Group
 
+            </button>
 
-        document.getElementById("chatStatus")
-            .textContent =
-            "Group";
+        </div>
 
+    </div>
 
-        document.getElementById("messageInput")
-            .disabled = false;
+</div>
 
 
-        document.getElementById("sendButton")
-            .disabled = false;
+<!-- =========================================================
+     TOAST
+     ========================================================= -->
 
+<div
+    id="toast"
+    class="toast">
 
-        document.getElementById("messageInput")
-            .placeholder =
-            "Message #" + groupName + "...";
+    <span id="toastIcon">
+        ✓
+    </span>
 
+    <span id="toastMessage">
+        Success
+    </span>
 
-        document.getElementById("messages")
-            .innerHTML = "";
+</div>
 
 
-        socket.emit(
-            "get_group_history",
-            {
-                groupname: groupName
-            }
-        );
+<!-- =========================================================
+     SECURECHAT JAVASCRIPT
+     ========================================================= -->
 
-    }
-
-
-    // =========================
-    // GROUP HISTORY
-    // =========================
-
-    socket.on(
-        "group_history",
-        function(data) {
-
-            console.log(
-                "Group history:",
-                data
-            );
-
-
-            const messages =
-                document.getElementById("messages");
-
-            messages.innerHTML = "";
-
-
-            let history =
-                data.history ||
-                data.messages ||
-                data;
-
-
-            if (!Array.isArray(history)) {
-                return;
-            }
-
-
-            history.forEach(function(message) {
-
-                const sender =
-                    message.sender ||
-                    message.from ||
-                    "";
-
-                const text =
-                    message.message ||
-                    message.text ||
-                    "";
-
-
-                addMessage(
-                    sender,
-                    text,
-                    sender === currentUsername
-                );
-
-            });
-
-        }
-    );
-
-
-    // =========================
-    // SERVER ERROR
-    // =========================
-
-    socket.on("error", function(data) {
-
-        console.error(
-            "Server error:",
-            data
-        );
-
-    });
-
-
-    // =========================
-    // STATUS
-    // =========================
-
-    socket.on("status", function(data) {
-
-        console.log(
-            "Status:",
-            data
-        );
-
-    });
-
-
-    // =========================
-    // LOGOUT
-    // =========================
-
-    function logout() {
-
-        if (
-            !confirm(
-                "Are you sure you want to logout?"
-            )
-        ) {
-
-            return;
-
-        }
-
-
-        /*
-         * Tell server to close the TCP chat
-         * connection.
-         */
-
-        socket.emit("logout");
-
-
-        sessionStorage.removeItem(
-            "username"
-        );
-
-
-        socket.disconnect();
-
-
-        window.location.href = "/";
-
-    }
-
-
-    // =========================
-    // ESCAPE HTML
-    // =========================
-
-    function escapeHtml(value) {
-
-        const div =
-            document.createElement("div");
-
-        div.textContent =
-            String(value);
-
-        return div.innerHTML;
-
-    }
-
-
-    // =========================
-    // PERIODIC USER REFRESH
-    // =========================
-
-
-
-    // =========================
-    // DEBUG CONNECTION
-    // =========================
-
-    socket.on("disconnect", function(reason) {
-
-        console.log(
-            "Socket disconnected:",
-            reason
-        );
-
-    });
-
-
-</script>
+<script src="/static/script.js"></script>
 
 </body>
+
 </html>

@@ -1,640 +1,689 @@
 <!DOCTYPE html>
-
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-```
-<title>SecureChat</title>
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0">
 
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <title>SecureChat</title>
 
-<style>
+    <link
+        rel="stylesheet"
+        href="/static/style.css">
 
-    * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-        font-family: Arial, Helvetica, sans-serif;
-    }
-
-    body {
-        min-height: 100vh;
-        background: #0f172a;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        color: white;
-    }
-
-    .container {
-        width: 420px;
-        max-width: 90%;
-        background: #1e293b;
-        border-radius: 16px;
-        padding: 35px;
-        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
-    }
-
-    .logo {
-        text-align: center;
-        margin-bottom: 30px;
-    }
-
-    .logo-icon {
-        font-size: 45px;
-        margin-bottom: 10px;
-    }
-
-    .logo h1 {
-        font-size: 30px;
-        margin-bottom: 8px;
-    }
-
-    .logo p {
-        color: #94a3b8;
-        font-size: 14px;
-    }
-
-    .tabs {
-        display: flex;
-        margin-bottom: 25px;
-        background: #0f172a;
-        border-radius: 10px;
-        padding: 4px;
-    }
-
-    .tab {
-        width: 50%;
-        padding: 12px;
-        border: none;
-        background: transparent;
-        color: #94a3b8;
-        cursor: pointer;
-        border-radius: 8px;
-        font-size: 15px;
-    }
-
-    .tab.active {
-        background: #2563eb;
-        color: white;
-    }
-
-    .form-group {
-        margin-bottom: 18px;
-    }
-
-    .form-group label {
-        display: block;
-        margin-bottom: 7px;
-        color: #cbd5e1;
-        font-size: 14px;
-    }
-
-    .form-group input {
-        width: 100%;
-        padding: 13px;
-        border: 1px solid #334155;
-        border-radius: 9px;
-        background: #0f172a;
-        color: white;
-        outline: none;
-        font-size: 15px;
-    }
-
-    .form-group input:focus {
-        border-color: #3b82f6;
-    }
-
-    .submit-btn {
-        width: 100%;
-        padding: 14px;
-        border: none;
-        border-radius: 9px;
-        background: #2563eb;
-        color: white;
-        font-size: 16px;
-        cursor: pointer;
-        margin-top: 5px;
-    }
-
-    .submit-btn:hover {
-        background: #1d4ed8;
-    }
-
-    .submit-btn:disabled {
-        background: #475569;
-        cursor: not-allowed;
-    }
-
-    .message {
-        display: none;
-        padding: 12px;
-        border-radius: 8px;
-        margin-bottom: 18px;
-        font-size: 14px;
-        text-align: center;
-    }
-
-    .message.error {
-        display: block;
-        background: #450a0a;
-        color: #fca5a5;
-        border: 1px solid #7f1d1d;
-    }
-
-    .message.success {
-        display: block;
-        background: #052e16;
-        color: #86efac;
-        border: 1px solid #166534;
-    }
-
-    .connection {
-        margin-top: 20px;
-        text-align: center;
-        font-size: 13px;
-        color: #94a3b8;
-    }
-
-    .status-dot {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #ef4444;
-        margin-right: 5px;
-    }
-
-    .status-dot.connected {
-        background: #22c55e;
-    }
-
-    .footer {
-        text-align: center;
-        margin-top: 25px;
-        color: #64748b;
-        font-size: 12px;
-    }
-
-</style>
-```
-
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 
-<body>
+<body class="chat-page">
 
-<div class="container">
+<div class="app">
 
-```
-<div class="logo">
+    <!-- =====================================================
+         SIDEBAR
+         ===================================================== -->
 
-    <div class="logo-icon">
-        🔐
-    </div>
+    <aside class="sidebar">
 
-    <h1>SecureChat</h1>
+        <!-- BRAND -->
 
-    <p>Private. Secure. Connected.</p>
+        <div class="sidebar-brand">
+
+            <div class="brand-icon small">
+                🔐
+            </div>
+
+            <div>
+
+                <h2>
+                    SecureChat
+                </h2>
+
+                <span>
+                    TCP Network
+                </span>
+
+            </div>
+
+        </div>
+
+
+        <!-- CURRENT USER -->
+
+        <div class="current-user">
+
+            <div
+                class="avatar"
+                id="myAvatar">
+                U
+            </div>
+
+            <div class="user-info">
+
+                <strong id="currentUsername">
+                    User
+                </strong>
+
+                <span class="online-status">
+
+                    <i></i>
+
+                    Online
+
+                </span>
+
+            </div>
+
+        </div>
+
+
+        <!-- NAVIGATION -->
+
+        <div class="sidebar-section">
+
+            <div class="section-title">
+                Communication
+            </div>
+
+
+            <button
+                class="sidebar-item active"
+                type="button"
+                onclick="showUsers()">
+
+                <span>
+                    👤
+                </span>
+
+                <span>
+                    Users
+                </span>
+
+                <span
+                    id="onlineCount"
+                    class="count">
+                    0
+                </span>
+
+            </button>
+
+
+            <button
+                class="sidebar-item"
+                type="button"
+                onclick="showGroups()">
+
+                <span>
+                    👥
+                </span>
+
+                <span>
+                    Groups
+                </span>
+
+                <span
+                    id="groupCount"
+                    class="count">
+                    0
+                </span>
+
+            </button>
+
+        </div>
+
+
+        <!-- =====================================================
+             USERS
+             ===================================================== -->
+
+        <div
+            id="usersPanel"
+            class="sidebar-list">
+
+            <div class="list-heading">
+                Online Users
+            </div>
+
+            <div id="usersList">
+
+                <div class="empty-list">
+                    No users online
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- =====================================================
+             GROUPS
+             ===================================================== -->
+
+        <div
+            id="groupsPanel"
+            class="sidebar-list hidden">
+
+            <div class="list-heading">
+
+                <span>
+                    Groups
+                </span>
+
+                <button
+                    class="add-btn"
+                    type="button"
+                    onclick="openCreateGroup()">
+
+                    +
+
+                </button>
+
+            </div>
+
+
+            <div id="groupsList">
+
+                <div class="empty-list">
+                    No groups
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- =====================================================
+             NETWORK
+             ===================================================== -->
+
+        <div class="network-card">
+
+            <div class="network-header">
+
+                <span>
+                    NETWORK
+                </span>
+
+                <span class="network-live">
+                    LIVE
+                </span>
+
+            </div>
+
+
+            <div class="network-row">
+
+                <span>
+                    Status
+                </span>
+
+                <strong id="networkStatus">
+                    Connected
+                </strong>
+
+            </div>
+
+
+            <div class="network-row">
+
+                <span>
+                    Protocol
+                </span>
+
+                <strong>
+                    TCP
+                </strong>
+
+            </div>
+
+
+            <div class="network-row">
+
+                <span>
+                    Clients
+                </span>
+
+                <strong id="networkClients">
+                    0
+                </strong>
+
+            </div>
+
+        </div>
+
+
+        <!-- LOGOUT -->
+
+        <button
+            class="logout-btn"
+            type="button"
+            onclick="logout()">
+
+            <span>
+                ↪
+            </span>
+
+            Logout
+
+        </button>
+
+    </aside>
+
+
+    <!-- =====================================================
+         MAIN CHAT AREA
+         ===================================================== -->
+
+    <main class="main">
+
+
+        <!-- =================================================
+             CHAT HEADER
+             ================================================= -->
+
+        <header class="chat-header">
+
+            <div
+                id="chatHeader"
+                class="chat-header-info">
+
+                <div class="chat-avatar">
+                    💬
+                </div>
+
+                <div>
+
+                    <h2 id="chatTitle">
+                        Select a user
+                    </h2>
+
+                    <p id="chatSubtitle">
+                        Choose someone to start chatting
+                    </p>
+
+                </div>
+
+            </div>
+
+
+            <div class="header-actions">
+
+                <!-- REFRESH -->
+
+                <button
+                    class="icon-btn"
+                    type="button"
+                    title="Refresh"
+                    onclick="refreshData()">
+
+                    ↻
+
+                </button>
+
+
+                <!-- GROUP INFO -->
+
+                <button
+                    id="groupInfoBtn"
+                    class="icon-btn hidden"
+                    type="button"
+                    title="Group information"
+                    onclick="openGroupInfo()">
+
+                    ⓘ
+
+                </button>
+
+            </div>
+
+        </header>
+
+
+        <!-- =================================================
+             WELCOME SCREEN
+             ================================================= -->
+
+        <div
+            id="welcomeScreen"
+            class="welcome-screen">
+
+            <div class="welcome-icon">
+                🔐
+            </div>
+
+
+            <h1>
+                SecureChat
+            </h1>
+
+
+            <p>
+                Select a user or group from the sidebar
+                to start a secure conversation.
+            </p>
+
+
+            <div class="feature-cards">
+
+
+                <!-- TCP -->
+
+                <div class="feature-card">
+
+                    <div>
+                        🌐
+                    </div>
+
+                    <strong>
+                        TCP Communication
+                    </strong>
+
+                    <span>
+                        Reliable client-server messaging
+                        using TCP sockets.
+                    </span>
+
+                </div>
+
+
+                <!-- MULTI CLIENT -->
+
+                <div class="feature-card">
+
+                    <div>
+                        👥
+                    </div>
+
+                    <strong>
+                        Multi-Client
+                    </strong>
+
+                    <span>
+                        Multiple users connected
+                        simultaneously.
+                    </span>
+
+                </div>
+
+
+                <!-- SECURITY -->
+
+                <div class="feature-card">
+
+                    <div>
+                        🔒
+                    </div>
+
+                    <strong>
+                        Secure
+                    </strong>
+
+                    <span>
+                        Authentication and encrypted
+                        communication.
+                    </span>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             MESSAGES
+             ================================================= -->
+
+        <div
+            id="messagesContainer"
+            class="messages-container hidden">
+
+            <div id="messages">
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             MESSAGE INPUT
+             ================================================= -->
+
+        <div
+            id="messageArea"
+            class="message-area hidden">
+
+            <div class="message-input-wrapper">
+
+                <input
+                    type="text"
+                    id="messageInput"
+                    placeholder="Type your message..."
+                    autocomplete="off"
+                    onkeydown="handleMessageKey(event)">
+
+
+                <button
+                    class="send-btn"
+                    type="button"
+                    onclick="sendMessage()">
+
+                    ➤
+
+                </button>
+
+            </div>
+
+
+            <div class="input-hint">
+                Press Enter to send
+            </div>
+
+        </div>
+
+    </main>
 
 </div>
 
 
-<!-- LOGIN / REGISTER TABS -->
-
-<div class="tabs">
-
-    <button
-        id="loginTab"
-        class="tab active"
-        onclick="showLogin()">
-
-        Login
-
-    </button>
-
-    <button
-        id="registerTab"
-        class="tab"
-        onclick="showRegister()">
-
-        Register
-
-    </button>
-
-</div>
-
-
-<!-- MESSAGE -->
+<!-- =========================================================
+     CREATE GROUP MODAL
+     ========================================================= -->
 
 <div
-    id="message"
-    class="message">
-</div>
+    id="createGroupModal"
+    class="modal hidden">
+
+    <div class="modal-card">
 
 
-<!-- FORM -->
+        <div class="modal-header">
 
-<form id="authForm">
+            <h2>
+                Create Group
+            </h2>
 
-    <div class="form-group">
+            <button
+                type="button"
+                onclick="closeCreateGroup()">
 
-        <label for="username">
-            Username
-        </label>
+                ×
+
+            </button>
+
+        </div>
+
+
+        <p>
+            Create a new group for multiple users.
+        </p>
+
 
         <input
+            id="groupNameInput"
             type="text"
-            id="username"
-            placeholder="Enter username"
-            autocomplete="username"
-            required>
+            placeholder="Enter group name"
+            autocomplete="off">
+
+
+        <div class="modal-actions">
+
+
+            <button
+                class="secondary-btn"
+                type="button"
+                onclick="closeCreateGroup()">
+
+                Cancel
+
+            </button>
+
+
+            <button
+                class="primary-btn"
+                type="button"
+                onclick="createGroup()">
+
+                Create Group
+
+            </button>
+
+        </div>
 
     </div>
 
+</div>
 
-    <div class="form-group">
 
-        <label for="password">
-            Password
-        </label>
+<!-- =========================================================
+     GROUP INFO MODAL
+     ========================================================= -->
 
-        <input
-            type="password"
-            id="password"
-            placeholder="Enter password"
-            autocomplete="current-password"
-            required>
+<div
+    id="groupInfoModal"
+    class="modal hidden">
+
+    <div class="modal-card group-info-card">
+
+
+        <!-- HEADER -->
+
+        <div class="modal-header">
+
+            <div>
+
+                <h2 id="infoGroupName">
+                    Group
+                </h2>
+
+                <p id="infoGroupMeta">
+                    Group members
+                </p>
+
+            </div>
+
+
+            <button
+                type="button"
+                onclick="closeGroupInfo()">
+
+                ×
+
+            </button>
+
+        </div>
+
+
+        <!-- =================================================
+             ADD MEMBERS
+             ================================================= -->
+
+        <div class="add-member-section">
+
+            <h3>
+                Add Members
+            </h3>
+
+
+            <div class="member-actions">
+
+                <select id="addMemberSelect">
+
+                    <option value="">
+                        Select a user
+                    </option>
+
+                </select>
+
+
+                <button
+                    class="primary-btn"
+                    type="button"
+                    onclick="addSelectedMember()">
+
+                    + Add
+
+                </button>
+
+            </div>
+
+        </div>
+
+
+        <!-- =================================================
+             MEMBERS
+             ================================================= -->
+
+        <div class="members-section">
+
+            <h3>
+                Members
+            </h3>
+
+
+            <div
+                id="groupMembersList"
+                class="members-list">
+
+                <div class="empty-list">
+                    No members found
+                </div>
+
+            </div>
+
+        </div>
 
     </div>
 
-
-    <button
-        type="submit"
-        id="submitBtn"
-        class="submit-btn">
-
-        Login
-
-    </button>
-
-</form>
+</div>
 
 
-<!-- CONNECTION STATUS -->
+<!-- =========================================================
+     TOAST
+     ========================================================= -->
 
-<div class="connection">
+<div
+    id="toast"
+    class="toast">
 
-    <span
-        id="statusDot"
-        class="status-dot">
+    <span id="toastIcon">
+        ✓
     </span>
 
-    <span id="connectionText">
-        Connecting to server...
+    <span id="toastMessage">
+        Success
     </span>
 
 </div>
 
 
-<div class="footer">
-
-    SecureChat • TCP + Socket.IO
-
-</div>
-```
-
-</div>
-
-<script>
-
-    // ==========================================
-    // SOCKET.IO
-    // ==========================================
-
-    const socket = io();
-
-
-    // ==========================================
-    // VARIABLES
-    // ==========================================
-
-    let currentMode = "login";
-
-
-    // ==========================================
-    // DOM ELEMENTS
-    // ==========================================
-
-    const authForm =
-        document.getElementById("authForm");
-
-    const usernameInput =
-        document.getElementById("username");
-
-    const passwordInput =
-        document.getElementById("password");
-
-    const submitBtn =
-        document.getElementById("submitBtn");
-
-    const messageBox =
-        document.getElementById("message");
-
-    const loginTab =
-        document.getElementById("loginTab");
-
-    const registerTab =
-        document.getElementById("registerTab");
-
-    const statusDot =
-        document.getElementById("statusDot");
-
-    const connectionText =
-        document.getElementById("connectionText");
-
-
-    // ==========================================
-    // SHOW LOGIN
-    // ==========================================
-
-    function showLogin() {
-
-        currentMode = "login";
-
-        loginTab.classList.add("active");
-
-        registerTab.classList.remove("active");
-
-        submitBtn.textContent = "Login";
-
-        usernameInput.value = "";
-
-        passwordInput.value = "";
-
-        clearMessage();
-    }
-
-
-    // ==========================================
-    // SHOW REGISTER
-    // ==========================================
-
-    function showRegister() {
-
-        currentMode = "register";
-
-        registerTab.classList.add("active");
-
-        loginTab.classList.remove("active");
-
-        submitBtn.textContent = "Create Account";
-
-        usernameInput.value = "";
-
-        passwordInput.value = "";
-
-        clearMessage();
-    }
-
-
-    // ==========================================
-    // SHOW MESSAGE
-    // ==========================================
-
-    function showMessage(text, type) {
-
-        messageBox.textContent = text;
-
-        messageBox.className =
-            "message " + type;
-    }
-
-
-    // ==========================================
-    // CLEAR MESSAGE
-    // ==========================================
-
-    function clearMessage() {
-
-        messageBox.textContent = "";
-
-        messageBox.className =
-            "message";
-    }
-
-
-    // ==========================================
-    // SOCKET CONNECTED
-    // ==========================================
-
-    socket.on("connect", function() {
-
-        statusDot.classList.add("connected");
-
-        connectionText.textContent =
-            "Connected to server";
-
-    });
-
-
-    // ==========================================
-    // SOCKET DISCONNECTED
-    // ==========================================
-
-    socket.on("disconnect", function() {
-
-        statusDot.classList.remove("connected");
-
-        connectionText.textContent =
-            "Disconnected from server";
-
-    });
-
-
-    // ==========================================
-    // LOGIN / REGISTER FORM
-    // ==========================================
-
-    authForm.addEventListener(
-        "submit",
-        function(event) {
-
-            event.preventDefault();
-
-            const username =
-                usernameInput.value.trim();
-
-            const password =
-                passwordInput.value;
-
-            if (!username) {
-
-                showMessage(
-                    "Please enter a username.",
-                    "error"
-                );
-
-                return;
-            }
-
-            if (!password) {
-
-                showMessage(
-                    "Please enter a password.",
-                    "error"
-                );
-
-                return;
-            }
-
-
-            submitBtn.disabled = true;
-
-            submitBtn.textContent =
-                currentMode === "login"
-                    ? "Logging in..."
-                    : "Creating account...";
-
-
-            clearMessage();
-
-
-            const data = {
-
-                username: username,
-
-                password: password
-
-            };
-
-
-            if (currentMode === "login") {
-
-                socket.emit(
-                    "login",
-                    data
-                );
-
-            } else {
-
-                socket.emit(
-                    "register",
-                    data
-                );
-
-            }
-
-        }
-    );
-
-
-    // ==========================================
-    // LOGIN SUCCESS
-    // ==========================================
-
-    socket.on(
-        "login_success",
-        function(data) {
-
-            showMessage(
-                data.message ||
-                "Login successful!",
-                "success"
-            );
-
-            sessionStorage.setItem(
-                "username",
-                data.username
-            );
-
-            setTimeout(
-                function() {
-
-                    window.location.href =
-                        "/chat";
-
-                },
-                500
-            );
-
-        }
-    );
-
-
-    // ==========================================
-    // LOGIN ERROR
-    // ==========================================
-
-    socket.on(
-        "login_error",
-        function(data) {
-
-            showMessage(
-                data.message ||
-                "Login failed.",
-                "error"
-            );
-
-            submitBtn.disabled = false;
-
-            submitBtn.textContent =
-                "Login";
-
-        }
-    );
-
-
-    // ==========================================
-    // REGISTER SUCCESS
-    // ==========================================
-
-    socket.on(
-        "register_success",
-        function(data) {
-
-            showMessage(
-                data.message ||
-                "Registration successful! You can now login.",
-                "success"
-            );
-
-            submitBtn.disabled = false;
-
-            showLogin();
-
-            usernameInput.value = "";
-
-            passwordInput.value = "";
-
-        }
-    );
-
-
-    // ==========================================
-    // REGISTER ERROR
-    // ==========================================
-
-    socket.on(
-        "register_error",
-        function(data) {
-
-            showMessage(
-                data.message ||
-                "Registration failed.",
-                "error"
-            );
-
-            submitBtn.disabled = false;
-
-            submitBtn.textContent =
-                "Create Account";
-
-        }
-    );
-
-</script>
+<!-- =========================================================
+     SCRIPT
+     ========================================================= -->
+
+<script src="/static/script.js"></script>
 
 </body>
+
 </html>

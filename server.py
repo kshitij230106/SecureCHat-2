@@ -1,96 +1,151 @@
 import socket
+
+
 import threading
+
+
 import database
 
-# =========================================================
-# CONFIGURATION
-# =========================================================
-
 HOST = "0.0.0.0"
+
+
 PORT = 5000
 
 
-# =========================================================
-# GLOBAL STATE
-# =========================================================
-
 clients = {}
+
+
 public_keys = {}
 
+
 clients_lock = threading.Lock()
+
+
 keys_lock = threading.Lock()
 
+
+send_locks = {}
+
+
+send_locks_lock = threading.Lock()
+
+
 server = None
+
+
 running = True
 
-
-# =========================================================
-# DATABASE
-# =========================================================
 
 database.create_tables()
 
 
 # =========================================================
-# SEND MESSAGE
-# Newline-delimited protocol
+
+
+# SEND
+
+
 # =========================================================
 
 
 def send_message(client, message):
+
+    if client is None:
+
+        return False
+
+    socket_id = id(client)
+
+    with send_locks_lock:
+
+        lock = send_locks.setdefault(socket_id, threading.Lock())
+
     try:
-        client.sendall((message + "\n").encode())
+
+        with lock:
+
+            client.sendall((message + "\n").encode("utf-8"))
+
         return True
-    except Exception:
+
+    except Exception as e:
+
+        print("[SEND ERROR]", e)
+
         return False
 
 
 # =========================================================
+
+
 # RECEIVE LINE
-# Handles TCP packet merging/splitting
+
+
 # =========================================================
 
 
 def receive_line(client, buffer):
-    while "\n" not in buffer:
-        data = client.recv(4096)
 
-        if not data:
-            return None, buffer
+    try:
 
-        buffer += data.decode()
+        while "\n" not in buffer:
 
-    line, buffer = buffer.split("\n", 1)
+            data = client.recv(4096)
 
-    return line.strip(), buffer
+            if not data:
+
+                return None, buffer
+
+            buffer += data.decode("utf-8")
+
+        line, buffer = buffer.split("\n", 1)
+
+        return line.strip(), buffer
+
+    except Exception as e:
+
+        print("[RECEIVE ERROR]", e)
+
+        return None, buffer
 
 
 # =========================================================
+
+
 # BROADCAST
+
+
 # =========================================================
 
 
 def broadcast(message, exclude=None):
 
     with clients_lock:
+
         current_clients = list(clients.items())
 
     for username, client in current_clients:
 
         if username == exclude:
+
             continue
 
         send_message(client, message)
 
 
 # =========================================================
-# SEND ONLINE USER LIST
+
+
+# USER LIST
+
+
 # =========================================================
 
 
 def send_user_list():
 
     with clients_lock:
+
         users = list(clients.keys())
 
     message = "USERS|" + "|".join(users)
@@ -99,24 +154,24 @@ def send_user_list():
 
 
 # =========================================================
-# GET GROUP NAMES
-#
-# Handles both possible database return formats:
-#
-# ["friends", "TestGroup"]
-#
-# OR
-#
-# [(1, "friends", "Rahul", ...), ...]
+
+
+# GROUP NAMES
+
+
 # =========================================================
 
 
 def get_group_names():
 
     try:
+
         group_list = database.get_groups()
+
     except Exception as e:
+
         print("[GROUP ERROR]", e)
+
         return []
 
     names = []
@@ -130,13 +185,18 @@ def get_group_names():
         elif isinstance(group, (tuple, list)):
 
             if len(group) >= 2:
+
                 names.append(str(group[1]))
 
     return names
 
 
 # =========================================================
-# SEND GROUP LIST
+
+
+# GROUP LIST
+
+
 # =========================================================
 
 
@@ -145,15 +205,22 @@ def send_group_list(client):
     names = get_group_names()
 
     if names:
+
         message = "GROUPS|" + "|".join(names)
+
     else:
+
         message = "GROUPS|"
 
     send_message(client, message)
 
 
 # =========================================================
+
+
 # AUTHENTICATION
+
+
 # =========================================================
 
 
@@ -163,15 +230,12 @@ def authenticate(client):
 
     try:
 
-        # -------------------------------------------------
-        # ASK LOGIN / REGISTER
-        # -------------------------------------------------
-
         send_message(client, "AUTH_REQUEST")
 
         choice, buffer = receive_line(client, buffer)
 
         if choice is None:
+
             return None, buffer
 
         choice = choice.strip().upper()
@@ -183,7 +247,9 @@ def authenticate(client):
             return None, buffer
 
         # -------------------------------------------------
-        # ASK USERNAME
+
+        # USERNAME
+
         # -------------------------------------------------
 
         send_message(client, "USERNAME")
@@ -191,6 +257,7 @@ def authenticate(client):
         username, buffer = receive_line(client, buffer)
 
         if username is None:
+
             return None, buffer
 
         username = username.strip()
@@ -202,7 +269,9 @@ def authenticate(client):
             return None, buffer
 
         # -------------------------------------------------
-        # ASK PASSWORD
+
+        # PASSWORD
+
         # -------------------------------------------------
 
         send_message(client, "PASSWORD")
@@ -210,6 +279,7 @@ def authenticate(client):
         password, buffer = receive_line(client, buffer)
 
         if password is None:
+
             return None, buffer
 
         password = password.strip()
@@ -221,7 +291,9 @@ def authenticate(client):
             return None, buffer
 
         # =================================================
+
         # REGISTER
+
         # =================================================
 
         if choice == "REGISTER":
@@ -239,7 +311,9 @@ def authenticate(client):
             return None, buffer
 
         # =================================================
+
         # LOGIN
+
         # =================================================
 
         if not database.verify_login(username, password):
@@ -251,7 +325,9 @@ def authenticate(client):
             return None, buffer
 
         # -------------------------------------------------
-        # PREVENT DUPLICATE LOGIN
+
+        # DUPLICATE LOGIN
+
         # -------------------------------------------------
 
         with clients_lock:
@@ -267,7 +343,9 @@ def authenticate(client):
             clients[username] = client
 
         # -------------------------------------------------
-        # LOGIN SUCCESS
+
+        # SUCCESS
+
         # -------------------------------------------------
 
         send_message(client, f"AUTH_SUCCESS|Welcome {username}")
@@ -275,7 +353,9 @@ def authenticate(client):
         print(f"[LOGIN SUCCESS] {username}")
 
         # -------------------------------------------------
+
         # READY HANDSHAKE
+
         # -------------------------------------------------
 
         send_message(client, "READY_REQUEST")
@@ -283,20 +363,22 @@ def authenticate(client):
         ready, buffer = receive_line(client, buffer)
 
         if ready is None:
+
+            with clients_lock:
+
+                clients.pop(username, None)
+
             return None, buffer
 
         if ready != "READY":
 
             with clients_lock:
+
                 clients.pop(username, None)
 
             send_message(client, "AUTH_FAILED|Handshake failed")
 
             return None, buffer
-
-        # -------------------------------------------------
-        # READY OK
-        # -------------------------------------------------
 
         send_message(client, "READY_OK")
 
@@ -310,7 +392,11 @@ def authenticate(client):
 
 
 # =========================================================
-# SEND OFFLINE MESSAGES
+
+
+# PENDING MESSAGES
+
+
 # =========================================================
 
 
@@ -324,9 +410,8 @@ def send_pending_messages(username, client):
 
             send_message(client, f"MESSAGE|{sender}|{message_id}|{encrypted_message}")
 
-            print(f"[OFFLINE MESSAGE] {sender} -> {username}")
+            print(f"[OFFLINE MESSAGE] " f"{sender} -> {username}")
 
-            # Keep existing behavior
             database.update_message_status(message_id, "delivered")
 
     except Exception as e:
@@ -335,7 +420,11 @@ def send_pending_messages(username, client):
 
 
 # =========================================================
+
+
 # PRIVATE ENCRYPTED MESSAGE
+
+
 # =========================================================
 
 
@@ -350,10 +439,13 @@ def handle_private_message(username, command):
             return "ERROR|Invalid encrypted message format"
 
         receiver = parts[1].strip()
+
         encrypted_message = parts[2]
 
         # -------------------------------------------------
-        # CHECK RECEIVER
+
+        # RECEIVER CHECK
+
         # -------------------------------------------------
 
         if not database.get_user(receiver):
@@ -361,7 +453,9 @@ def handle_private_message(username, command):
             return "ERROR|User does not exist"
 
         # -------------------------------------------------
-        # PREVENT SELF MESSAGE
+
+        # SELF MESSAGE
+
         # -------------------------------------------------
 
         if receiver == username:
@@ -369,8 +463,9 @@ def handle_private_message(username, command):
             return "ERROR|Cannot message yourself"
 
         # -------------------------------------------------
-        # SAVE ENCRYPTED MESSAGE
-        # Server NEVER decrypts this message
+
+        # SAVE MESSAGE
+
         # -------------------------------------------------
 
         message_id = database.save_message(
@@ -378,7 +473,9 @@ def handle_private_message(username, command):
         )
 
         # -------------------------------------------------
-        # CHECK IF RECEIVER ONLINE
+
+        # FIND RECEIVER
+
         # -------------------------------------------------
 
         with clients_lock:
@@ -386,27 +483,32 @@ def handle_private_message(username, command):
             receiver_client = clients.get(receiver)
 
         # -------------------------------------------------
+
         # ONLINE
+
         # -------------------------------------------------
 
         if receiver_client:
 
             success = send_message(
-                receiver_client, f"MESSAGE|{username}|{message_id}|{encrypted_message}"
+                receiver_client,
+                f"MESSAGE|{username}|" f"{message_id}|" f"{encrypted_message}",
             )
 
             if success:
 
                 database.update_message_status(message_id, "delivered")
 
-                print(f"[ENCRYPTED] {username} -> {receiver}")
+                print(f"[ENCRYPTED] " f"{username} -> {receiver}")
 
             else:
 
-                print(f"[DELIVERY FAILED] {username} -> {receiver}")
+                print(f"[DELIVERY FAILED] " f"{username} -> {receiver}")
 
         # -------------------------------------------------
+
         # OFFLINE
+
         # -------------------------------------------------
 
         else:
@@ -423,7 +525,11 @@ def handle_private_message(username, command):
 
 
 # =========================================================
+
+
 # GROUP MESSAGE
+
+
 # =========================================================
 
 
@@ -438,10 +544,13 @@ def handle_group_message(username, command):
             return "ERROR|Invalid group message"
 
         group_name = parts[1].strip()
+
         message = parts[2]
 
         # -------------------------------------------------
-        # CHECK GROUP
+
+        # GROUP
+
         # -------------------------------------------------
 
         group = database.get_group(group_name)
@@ -451,27 +560,29 @@ def handle_group_message(username, command):
             return "ERROR|Group does not exist"
 
         # -------------------------------------------------
-        # GET MEMBERS
+
+        # MEMBERS
+
         # -------------------------------------------------
 
         members = database.get_group_members(group_name)
-
-        # -------------------------------------------------
-        # CHECK MEMBERSHIP
-        # -------------------------------------------------
 
         if username not in members:
 
             return "ERROR|You are not a member of this group"
 
         # -------------------------------------------------
-        # SAVE GROUP MESSAGE
+
+        # SAVE
+
         # -------------------------------------------------
 
         database.save_group_message(group_name, username, message)
 
         # -------------------------------------------------
-        # COPY ONLINE CLIENTS
+
+        # ONLINE CLIENTS
+
         # -------------------------------------------------
 
         with clients_lock:
@@ -479,22 +590,25 @@ def handle_group_message(username, command):
             current_clients = dict(clients)
 
         # -------------------------------------------------
-        # SEND TO MEMBERS
+
+        # SEND
+
         # -------------------------------------------------
 
         for member in members:
 
             if member == username:
+
                 continue
 
             if member in current_clients:
 
                 send_message(
                     current_clients[member],
-                    f"GROUP|{group_name}|" f"{username}: {message}",
+                    f"GROUP|{group_name}|" f"{username}|{message}",
                 )
 
-        print(f"[GROUP] " f"{username} -> {group_name}: {message}")
+        print(f"[GROUP] " f"{username} -> " f"{group_name}: " f"{message}")
 
         return "SENT"
 
@@ -506,144 +620,798 @@ def handle_group_message(username, command):
 
 
 # =========================================================
+
+
+# CREATE GROUP
+
+
+# =========================================================
+
+
+def handle_create_group(username, group_name):
+
+    group_name = group_name.strip()
+
+    if not group_name:
+
+        return "ERROR|Group name required"
+
+    try:
+
+        success = database.create_group(group_name, username)
+
+        if not success:
+
+            return "ERROR|Group already exists " "or could not be created"
+
+        print(f"[GROUP CREATED] " f"{username} -> {group_name}")
+
+        return f"GROUP_CREATED|{group_name}"
+
+    except Exception as e:
+
+        print("[CREATE GROUP ERROR]", e)
+
+        return "ERROR|Could not create group"
+
+
+# =========================================================
+
+
+# JOIN GROUP
+
+
+# =========================================================
+
+
+def handle_join_group(username, group_name):
+
+    group_name = group_name.strip()
+
+    if not group_name:
+
+        return "ERROR|Group name required"
+
+    try:
+
+        group = database.get_group(group_name)
+
+        if not group:
+
+            return "ERROR|Group does not exist"
+
+        members = database.get_group_members(group_name)
+
+        if username in members:
+
+            return f"JOINED|{group_name}"
+
+        success = database.add_member(group_name, username)
+
+        if not success:
+
+            return "ERROR|Could not join group"
+
+        print(f"[GROUP JOIN] " f"{username} -> {group_name}")
+
+        return f"JOINED|{group_name}"
+
+    except Exception as e:
+
+        print("[JOIN GROUP ERROR]", e)
+
+        return "ERROR|Could not join group"
+
+
+# =========================================================
+
+
+# GROUP MEMBERS
+
+
+# =========================================================
+
+
+def handle_group_members(username, group_name):
+
+    try:
+
+        group_name = group_name.strip()
+
+        group = database.get_group(group_name)
+
+        if not group:
+
+            return "ERROR|Group does not exist"
+
+        members = database.get_group_members(group_name)
+
+        if username not in members:
+
+            return "ERROR|You are not a member"
+
+        member_text = "|".join(members)
+
+        return f"MEMBERS|{group_name}|" f"{member_text}"
+
+    except Exception as e:
+
+        print("[MEMBERS ERROR]", e)
+
+        return "ERROR|Could not get group members"
+
+
+# =========================================================
+
+
+# ADD MEMBER
+
+
+# =========================================================
+
+
+def handle_add_member(username, group_name, target_user):
+
+    try:
+
+        group_name = group_name.strip()
+
+        target_user = target_user.strip()
+
+        group = database.get_group(group_name)
+
+        if not group:
+
+            return "ERROR|Group does not exist"
+
+        # -------------------------------------------------
+
+        # OWNER
+
+        # -------------------------------------------------
+
+        owner = None
+
+        if isinstance(group, (tuple, list)):
+
+            if len(group) >= 3:
+
+                owner = str(group[2])
+
+        if owner != username:
+
+            return "ERROR|Only the group owner " "can add members"
+
+        # -------------------------------------------------
+
+        # USER
+
+        # -------------------------------------------------
+
+        if not database.get_user(target_user):
+
+            return "ERROR|User does not exist"
+
+        # -------------------------------------------------
+
+        # ALREADY MEMBER
+
+        # -------------------------------------------------
+
+        members = database.get_group_members(group_name)
+
+        if target_user in members:
+
+            return "ERROR|User already in group"
+
+        success = database.add_member(group_name, target_user)
+
+        if not success:
+
+            return "ERROR|Could not add member"
+
+        print(f"[GROUP ADD] " f"{username} added " f"{target_user} to " f"{group_name}")
+
+        return f"MEMBER_ADDED|" f"{group_name}|" f"{target_user}"
+
+    except Exception as e:
+
+        print("[ADD MEMBER ERROR]", e)
+
+        return "ERROR|Could not add member"
+
+
+# =========================================================
+
+
+# REMOVE MEMBER
+
+
+# =========================================================
+
+
+def handle_remove_member(username, group_name, target_user):
+
+    try:
+
+        group_name = group_name.strip()
+
+        target_user = target_user.strip()
+
+        group = database.get_group(group_name)
+
+        if not group:
+
+            return "ERROR|Group does not exist"
+
+        # -------------------------------------------------
+
+        # OWNER
+
+        # -------------------------------------------------
+
+        owner = None
+
+        if isinstance(group, (tuple, list)):
+
+            if len(group) >= 3:
+
+                owner = str(group[2])
+
+        if owner != username:
+
+            return "ERROR|Only the group owner " "can remove members"
+
+        # -------------------------------------------------
+
+        # CANNOT REMOVE OWNER
+
+        # -------------------------------------------------
+
+        if target_user == owner:
+
+            return "ERROR|Owner cannot be removed"
+
+        members = database.get_group_members(group_name)
+
+        if target_user not in members:
+
+            return "ERROR|User is not a member"
+
+        success = database.remove_member(group_name, target_user)
+
+        if not success:
+
+            return "ERROR|Could not remove member"
+
+        print(
+            f"[GROUP REMOVE] "
+            f"{username} removed "
+            f"{target_user} from "
+            f"{group_name}"
+        )
+
+        return f"MEMBER_REMOVED|" f"{group_name}|" f"{target_user}"
+
+    except Exception as e:
+
+        print("[REMOVE MEMBER ERROR]", e)
+
+        return "ERROR|Could not remove member"
+
+
+# =========================================================
+
+
+# LEAVE GROUP
+
+
+# =========================================================
+
+
+def handle_leave_group(username, group_name):
+
+    try:
+
+        group_name = group_name.strip()
+
+        group = database.get_group(group_name)
+
+        if not group:
+
+            return "ERROR|Group does not exist"
+
+        # -------------------------------------------------
+
+        # OWNER
+
+        # -------------------------------------------------
+
+        owner = None
+
+        if isinstance(group, (tuple, list)):
+
+            if len(group) >= 3:
+
+                owner = str(group[2])
+
+        if owner == username:
+
+            return (
+                "ERROR|Group owner cannot leave. "
+                "Delete the group or transfer ownership."
+            )
+
+        members = database.get_group_members(group_name)
+
+        if username not in members:
+
+            return "ERROR|You are not a member"
+
+        success = database.leave_group(group_name, username)
+
+        if not success:
+
+            return "ERROR|Could not leave group"
+
+        print(f"[GROUP LEAVE] " f"{username} -> {group_name}")
+
+        return f"LEFT|{group_name}"
+
+    except Exception as e:
+
+        print("[LEAVE GROUP ERROR]", e)
+
+        return "ERROR|Could not leave group"
+
+
+# =========================================================
+
+
+# GROUP HISTORY
+
+
+# =========================================================
+
+
+def handle_group_history(username, group_name):
+
+    try:
+
+        group_name = group_name.strip()
+
+        group = database.get_group(group_name)
+
+        if not group:
+
+            return "ERROR|Group does not exist"
+
+        members = database.get_group_members(group_name)
+
+        if username not in members:
+
+            return "ERROR|You are not a member"
+
+        messages = database.get_group_messages(group_name)
+
+        records = []
+
+        for record in messages:
+
+            try:
+
+                sender = record[0]
+
+                message = record[1]
+
+                timestamp = record[2]
+
+                records.append(f"{timestamp} | " f"{sender} | " f"{message}")
+
+            except Exception:
+
+                continue
+
+        history = ";;".join(records)
+
+        return f"GROUP_HISTORY|" f"{group_name}|" f"{history}"
+
+    except Exception as e:
+
+        print("[GROUP HISTORY ERROR]", e)
+
+        return "ERROR|Could not get group history"
+
+
+# =========================================================
+
+
+# PUBLIC KEY
+
+
+# =========================================================
+
+
+def handle_public_key(username, command):
+
+    try:
+
+        parts = command.split("|", 2)
+
+        if len(parts) != 3:
+
+            return "ERROR|Invalid public key format"
+
+        key_username = parts[1].strip()
+
+        public_key = parts[2]
+
+        if key_username != username:
+
+            return "ERROR|Username mismatch"
+
+        database.update_public_key(username, public_key)
+
+        with keys_lock:
+
+            public_keys[username] = public_key
+
+        print(f"[KEY REGISTERED] " f"{username}")
+
+        return f"KEY_SUCCESS|" f"Public key registered"
+
+    except Exception as e:
+
+        print("[PUBLIC KEY ERROR]", e)
+
+        return "ERROR|Could not register public key"
+
+
+# =========================================================
+
+
+# PUBLIC KEY REQUEST
+
+
+# =========================================================
+
+
+def handle_key_request(username, target):
+
+    try:
+
+        target = target.strip()
+
+        public_key = database.get_public_key(target)
+
+        if not public_key:
+
+            return "ERROR|Public key not found"
+
+        return f"PUBLIC_KEY|" f"{target}|" f"{public_key}"
+
+    except Exception as e:
+
+        print("[KEY REQUEST ERROR]", e)
+
+        return "ERROR|Could not get public key"
+
+
+# =========================================================
+
+
 # CLIENT HANDLER
+
+
 # =========================================================
 
 
 def handle_client(client, address):
 
     username = None
+
     buffer = ""
 
     try:
 
-        # =================================================
-        # AUTHENTICATION
-        # =================================================
+        print(f"[NEW CONNECTION] {address}")
 
         username, buffer = authenticate(client)
 
         if not username:
 
             try:
+
                 client.close()
+
             except Exception:
+
                 pass
 
             return
 
-        print(f"[CONNECTED] {username} " f"from {address}")
-
-        # =================================================
-        # NOTIFY OTHER USERS
-        # =================================================
-
-        broadcast(f"SERVER|{username} joined the chat", exclude=username)
-
         send_user_list()
 
-        # =================================================
-        # SEND GROUP LIST
-        # =================================================
-
         send_group_list(client)
-
-        # =================================================
-        # SEND OFFLINE MESSAGES
-        # =================================================
 
         send_pending_messages(username, client)
 
         # =================================================
-        # MAIN CLIENT LOOP
+
+        # MAIN LOOP
+
         # =================================================
 
-        while running:
+        while True:
 
             command, buffer = receive_line(client, buffer)
 
             if command is None:
+
                 break
 
             if not command:
+
                 continue
 
+            print(f"[COMMAND] " f"{username}: " f"{command}")
+
             # =================================================
-            # PUBLIC KEY REGISTRATION
+
+            # USERS
+
             # =================================================
 
-            if command.startswith("PUBLIC_KEY|"):
+            if command == "/users":
 
-                parts = command.split("|", 2)
+                send_user_list()
 
-                # -------------------------------------------------
-                # New format:
-                # PUBLIC_KEY|username|public_key
-                # -------------------------------------------------
+            # =================================================
 
-                if len(parts) == 3:
+            # GROUPS
 
-                    key_username = parts[1]
-                    public_key = parts[2]
+            # =================================================
 
-                    # Only allow user to register own key
-                    if key_username != username:
+            elif command == "/groups":
 
-                        send_message(client, "ERROR|Invalid public key username")
+                send_group_list(client)
 
-                        continue
+            # =================================================
 
-                # -------------------------------------------------
-                # Also support:
-                # PUBLIC_KEY|public_key
-                # -------------------------------------------------
+            # CREATE GROUP
 
-                elif len(parts) == 2:
+            # =================================================
 
-                    public_key = parts[1]
+            elif command.startswith("/create "):
 
-                else:
+                group_name = command[len("/create ") :]
 
-                    send_message(client, "ERROR|Invalid public key format")
+                result = handle_create_group(username, group_name)
+
+                send_message(client, result)
+
+                if result.startswith("GROUP_CREATED|"):
+
+                    send_group_list(client)
+
+            # =================================================
+
+            # JOIN GROUP
+
+            # =================================================
+
+            elif command.startswith("/join "):
+
+                group_name = command[len("/join ") :]
+
+                result = handle_join_group(username, group_name)
+
+                send_message(client, result)
+
+                if result.startswith("JOINED|"):
+
+                    send_group_list(client)
+
+            # =================================================
+
+            # GROUP MEMBERS
+
+            # =================================================
+
+            elif command.startswith("/members "):
+
+                group_name = command[len("/members ") :]
+
+                result = handle_group_members(username, group_name)
+
+                send_message(client, result)
+
+            # =================================================
+
+            # ADD MEMBER
+
+            # =================================================
+
+            elif command.startswith("/addmember "):
+
+                content = command[len("/addmember ") :]
+
+                parts = content.split(" ", 1)
+
+                if len(parts) != 2:
+
+                    send_message(client, "ERROR|Usage: " "/addmember group user")
 
                     continue
 
-                # -------------------------------------------------
-                # SAVE KEY
-                # -------------------------------------------------
+                group_name = parts[0]
 
-                database.save_public_key(username, public_key)
+                target_user = parts[1]
 
-                with keys_lock:
+                result = handle_add_member(username, group_name, target_user)
 
-                    public_keys[username] = public_key
+                send_message(client, result)
 
-                send_message(client, "KEY_SUCCESS|Public key registered")
+                if result.startswith("MEMBER_ADDED|"):
 
-                print(f"[KEY REGISTERED] " f"{username}")
+                    group_members = database.get_group_members(group_name)
+
+                    with clients_lock:
+
+                        current_clients = dict(clients)
+
+                    for member in group_members:
+
+                        if member in current_clients:
+
+                            send_message(
+                                current_clients[member],
+                                f"GROUP_UPDATED|" f"{group_name}",
+                            )
+
+                    # Send the newly-added member the complete group state immediately.
+
+                    if target_user in current_clients:
+
+                        members_result = handle_group_members(target_user, group_name)
+
+                        if members_result.startswith("MEMBERS|"):
+
+                            send_message(current_clients[target_user], members_result)
+
+                        history_result = handle_group_history(target_user, group_name)
+
+                        if history_result.startswith("GROUP_HISTORY|"):
+
+                            send_message(current_clients[target_user], history_result)
+
+                        send_group_list(current_clients[target_user])
+
+                        send_message(
+                            current_clients[target_user],
+                            f"MEMBER_ADDED|{group_name}|{target_user}",
+                        )
 
             # =================================================
-            # GET PUBLIC KEY
-            # =================================================
 
-            elif command.startswith("/key "):
-
-                target = command.split(" ", 1)[1].strip()
-
-                public_key = database.get_public_key(target)
-
-                if public_key:
-
-                    send_message(client, f"PUBLIC_KEY|" f"{target}|" f"{public_key}")
-
-                else:
-
-                    send_message(
-                        client, "ERROR|Public key not available " f"for {target}"
-                    )
+            # REMOVE MEMBER
 
             # =================================================
-            # ENCRYPTED PRIVATE MESSAGE
+
+            elif command.startswith("/removemember "):
+
+                content = command[len("/removemember ") :]
+
+                parts = content.rsplit(" ", 1)
+
+                if len(parts) != 2:
+
+                    send_message(client, "ERROR|Usage: " "/removemember group user")
+
+                    continue
+
+                group_name = parts[0]
+
+                target_user = parts[1]
+
+                result = handle_remove_member(username, group_name, target_user)
+
+                send_message(client, result)
+
+                if result.startswith("MEMBER_REMOVED|"):
+
+                    group_members = database.get_group_members(group_name)
+
+                    with clients_lock:
+
+                        current_clients = dict(clients)
+
+                    for member in group_members:
+
+                        if member in current_clients:
+
+                            send_message(
+                                current_clients[member],
+                                f"GROUP_UPDATED|" f"{group_name}",
+                            )
+
+                    if target_user in current_clients:
+
+                        send_message(
+                            current_clients[target_user],
+                            f"MEMBER_REMOVED|" f"{group_name}|" f"{target_user}",
+                        )
+
+            # =================================================
+
+            # LEAVE GROUP
+
+            # =================================================
+
+            elif command.startswith("/leave "):
+
+                group_name = command[len("/leave ") :]
+
+                result = handle_leave_group(username, group_name)
+
+                send_message(client, result)
+
+                if result.startswith("LEFT|"):
+
+                    send_group_list(client)
+
+            # =================================================
+
+            # GROUP MESSAGE
+
+            # =================================================
+
+            elif command.startswith("/groupmsg|"):
+
+                result = handle_group_message(username, command)
+
+                send_message(client, result)
+
+            elif command.startswith("/groupmsg "):
+
+                content = command[len("/groupmsg ") :]
+
+                parts = content.rsplit(" ", 1)
+
+                if len(parts) != 2:
+
+                    send_message(client, "ERROR|Usage: " "/groupmsg group message")
+
+                    continue
+
+                group_name = parts[0]
+
+                message = parts[1]
+
+                result = handle_group_message(
+                    username, f"/groupmsg|" f"{group_name}|" f"{message}"
+                )
+
+                send_message(client, result)
+
+            # =================================================
+
+            # GROUP HISTORY
+
+            # =================================================
+
+            elif command.startswith("/grouphistory "):
+
+                group_name = command[len("/grouphistory ") :]
+
+                result = handle_group_history(username, group_name)
+
+                send_message(client, result)
+
+            # =================================================
+
+            # PRIVATE MESSAGE
+
             # =================================================
 
             elif command.startswith("/encrypted|"):
@@ -653,7 +1421,9 @@ def handle_client(client, address):
                 send_message(client, result)
 
             # =================================================
-            # MESSAGE ACK
+
+            # ACK
+
             # =================================================
 
             elif command.startswith("/ack|"):
@@ -662,170 +1432,91 @@ def handle_client(client, address):
 
                     message_id = int(command.split("|", 1)[1])
 
-                    database.update_message_status(message_id, "delivered")
+                    database.update_message_status(message_id, "read")
 
-                except Exception:
-                    pass
+                except Exception as e:
 
-            # =================================================
-            # USERS
-            # =================================================
-
-            elif command == "/users":
-
-                send_user_list()
+                    print("[ACK ERROR]", e)
 
             # =================================================
-            # CREATE GROUP
-            # =================================================
 
-            elif command.startswith("/create "):
+            # HISTORY
 
-                group_name = command.split(" ", 1)[1].strip()
-
-                if not group_name:
-
-                    send_message(client, "ERROR|Group name cannot be empty")
-
-                    continue
-
-                if database.create_group(group_name, username):
-
-                    send_message(client, "GROUP_CREATED|" + group_name)
-
-                    print(f"[GROUP CREATED] " f"{username} -> " f"{group_name}")
-
-                else:
-
-                    send_message(client, "ERROR|Group already exists")
-
-            # =================================================
-            # JOIN GROUP
-            # =================================================
-
-            elif command.startswith("/join "):
-
-                group_name = command.split(" ", 1)[1].strip()
-
-                if not group_name:
-
-                    send_message(client, "ERROR|Group name cannot be empty")
-
-                    continue
-
-                if not database.get_group(group_name):
-
-                    send_message(client, "ERROR|Group does not exist")
-
-                elif database.add_member(group_name, username):
-
-                    send_message(client, "JOINED|" + group_name)
-
-                    print(f"[GROUP JOIN] " f"{username} -> " f"{group_name}")
-
-                else:
-
-                    send_message(client, "ERROR|Already a member")
-
-            # =================================================
-            # SHOW GROUPS
-            # =================================================
-
-            elif command == "/groups":
-
-                send_group_list(client)
-
-            # =================================================
-            # GROUP MESSAGE
-            # =================================================
-
-            elif command.startswith("/groupmsg "):
-
-                text = command.split(" ", 1)[1]
-
-                parts = text.split(" ", 1)
-
-                if len(parts) != 2:
-
-                    send_message(client, "ERROR|Usage: " "/groupmsg groupname message")
-
-                else:
-
-                    group_name = parts[0]
-                    message = parts[1]
-
-                    result = handle_group_message(
-                        username, f"/groupmsg|" f"{group_name}|" f"{message}"
-                    )
-
-                    send_message(client, result)
-
-            # =================================================
-            # PRIVATE MESSAGE HISTORY
             # =================================================
 
             elif command.startswith("/history "):
 
-                target = command.split(" ", 1)[1].strip()
+                target = command[len("/history ") :].strip()
 
-                history = database.get_messages(username, target)
+                history = database.get_messages_between_users(username, target)
 
-                if not history:
+                records = []
 
-                    send_message(client, "HISTORY|")
+                for row in history:
 
-                else:
+                    try:
 
-                    items = []
+                        timestamp = row[0]
 
-                    for sender, receiver, message, timestamp, status in history:
+                        sender = row[1]
 
-                        items.append(
+                        receiver = row[2]
+
+                        encrypted = row[3]
+
+                        records.append(
                             f"{timestamp} | "
                             f"{sender} -> "
                             f"{receiver} | "
-                            f"{message}"
+                            f"{encrypted}"
                         )
 
-                    send_message(client, "HISTORY|" + ";;".join(items))
+                    except Exception:
+
+                        continue
+
+                send_message(client, "HISTORY|" + ";;".join(records))
 
             # =================================================
-            # GROUP HISTORY
-            # =================================================
 
-            elif command.startswith("/grouphistory "):
-
-                group_name = command.split(" ", 1)[1].strip()
-
-                # Check group
-                if not database.get_group(group_name):
-
-                    send_message(client, "ERROR|Group does not exist")
-
-                    continue
-
-                history = database.get_group_messages(group_name)
-
-                items = []
-
-                for sender, message, timestamp in history:
-
-                    items.append(f"{timestamp} | " f"{sender}: " f"{message}")
-
-                send_message(client, "GROUPHISTORY|" + ";;".join(items))
+            # PUBLIC KEY
 
             # =================================================
+
+            elif command.startswith("PUBLIC_KEY|"):
+
+                result = handle_public_key(username, command)
+
+                send_message(client, result)
+
+            # =================================================
+
+            # KEY REQUEST
+
+            # =================================================
+
+            elif command.startswith("/key "):
+
+                target = command[len("/key ") :]
+
+                result = handle_key_request(username, target)
+
+                send_message(client, result)
+
+            # =================================================
+
             # EXIT
+
             # =================================================
 
             elif command == "/exit":
 
-                print(f"[EXIT] {username}")
-
                 break
 
             # =================================================
-            # UNKNOWN COMMAND
+
+            # UNKNOWN
+
             # =================================================
 
             else:
@@ -834,45 +1525,29 @@ def handle_client(client, address):
 
     except ConnectionResetError:
 
-        print(f"[CONNECTION RESET] {username}")
+        print(f"[CONNECTION RESET] " f"{username}")
 
     except ConnectionAbortedError:
 
-        print(f"[CONNECTION ABORTED] {username}")
+        print(f"[CONNECTION ABORTED] " f"{username}")
 
     except Exception as e:
 
-        print(f"[ERROR] {username}: {e}")
+        print(f"[CLIENT ERROR] " f"{username}: " f"{e}")
 
     finally:
-
-        # =================================================
-        # REMOVE CLIENT
-        # =================================================
 
         if username:
 
             with clients_lock:
 
-                clients.pop(username, None)
+                if clients.get(username) is client:
 
-            with keys_lock:
+                    clients.pop(username, None)
 
-                public_keys.pop(username, None)
-
-            print(f"[DISCONNECTED] {username}")
-
-            # -------------------------------------------------
-            # Notify remaining users
-            # -------------------------------------------------
-
-            broadcast(f"SERVER|{username} left the chat")
+            print(f"[DISCONNECTED] " f"{username}")
 
             send_user_list()
-
-        # =================================================
-        # CLOSE SOCKET
-        # =================================================
 
         try:
 
@@ -884,16 +1559,19 @@ def handle_client(client, address):
 
 
 # =========================================================
+
+
 # START SERVER
+
+
 # =========================================================
 
 
 def start_server():
 
     global server
-    global running
 
-    running = True
+    global running
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -901,108 +1579,55 @@ def start_server():
 
     server.bind((HOST, PORT))
 
-    server.listen(10)
+    server.listen(50)
 
-    # -----------------------------------------------------
-    # Allows CTRL+C to stop accept loop
-    # -----------------------------------------------------
+    print("======================================")
 
-    server.settimeout(1)
+    print("       SECURE CHAT TCP SERVER")
 
-    print("===================================")
+    print("======================================")
 
-    print("       SECURE CHAT SERVER")
+    print(f"Listening on " f"{HOST}:{PORT}")
 
-    print("===================================")
+    print("Server started...")
 
-    print(f"Server running on {HOST}:{PORT}")
-
-    print("Authentication: ENABLED")
-
-    print("Encryption: ENABLED 🔐")
-
-    print("Groups: ENABLED 👥")
-
-    print("Message History: ENABLED")
-
-    print("Offline Messages: ENABLED")
-
-    print("-----------------------------------")
-
-    print("Waiting for clients...")
-
-    print("Press CTRL+C to stop.")
-
-    print("-----------------------------------")
-
-    try:
-
-        while running:
-
-            try:
-
-                client, address = server.accept()
-
-                print(f"[NEW CONNECTION] " f"{address}")
-
-                thread = threading.Thread(
-                    target=handle_client, args=(client, address), daemon=True
-                )
-
-                thread.start()
-
-            except socket.timeout:
-
-                continue
-
-    except KeyboardInterrupt:
-
-        print("\nStopping server...")
-
-    finally:
-
-        running = False
-
-        # =================================================
-        # CLOSE ALL CLIENTS
-        # =================================================
-
-        with clients_lock:
-
-            current_clients = list(clients.values())
-
-            clients.clear()
-
-        for client in current_clients:
-
-            try:
-
-                send_message(client, "SERVER_SHUTDOWN")
-
-                client.close()
-
-            except Exception:
-
-                pass
-
-        # =================================================
-        # CLOSE SERVER SOCKET
-        # =================================================
+    while running:
 
         try:
 
-            server.close()
+            client, address = server.accept()
 
-        except Exception:
+            thread = threading.Thread(
+                target=handle_client, args=(client, address), daemon=True
+            )
 
-            pass
+            thread.start()
 
-        print("Server stopped.")
+        except OSError:
+
+            break
+
+        except Exception as e:
+
+            print("[SERVER ERROR]", e)
+
+    try:
+
+        server.close()
+
+    except Exception:
+
+        pass
 
 
 # =========================================================
+
+
 # MAIN
+
+
 # =========================================================
+
 
 if __name__ == "__main__":
 
