@@ -1,41 +1,53 @@
 // ============================================================
-// SECURECHAT - script.js
+// SECURECHAT  –  script.js
+// Fully wired to web_server.py Socket.IO events.
 // ============================================================
 
+'use strict';
+
+// ── State ────────────────────────────────────────────────────
 let socket = null;
 
-let currentUser = null;
-let currentChatUser = null;
-let currentGroup = null;
-let currentMode = null;
+let currentUser    = null;   // logged-in username
+let currentChatUser = null;  // open private-chat peer
+let currentGroup   = null;   // open group name
+let currentMode    = null;   // "private" | "group" | null
 
-let onlineUsers = [];
-let groups = [];
-let groupMembers = {};
+let onlineUsers = [];   // currently connected users (from /users)
+let allUsers    = [];   // all registered users      (from /allusers)
+let groups      = [];   // groups this user belongs to
 
+let groupMembers = {};  // groupName -> string[]
+let groupAdmins  = {};  // groupName -> adminUsername
+
+// Prevent duplicate socket handler registration
 let authHandlersBound = false;
 let chatHandlersBound = false;
+
+const USERNAME_KEY = 'securechat_username';
+const TOKEN_KEY    = 'securechat_token';
 
 
 // ============================================================
 // HELPERS
 // ============================================================
 
-function $(id) {
-    return document.getElementById(id);
-}
+function $(id) { return document.getElementById(id); }
 
+/** Safely escape HTML to prevent XSS */
 function escapeHtml(value) {
-    const div = document.createElement("div");
-    div.textContent = value == null ? "" : String(value);
-    return div.innerHTML;
+    const d = document.createElement('div');
+    d.textContent = value == null ? '' : String(value);
+    return d.innerHTML;
 }
 
+/** Case-insensitive username comparison */
 function sameUser(a, b) {
     if (a == null || b == null) return false;
     return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
 }
 
+/** Debounce a button action to avoid double-fire */
 function guard(fn, wait = 400) {
     let last = 0;
     return function (...args) {
@@ -46,160 +58,161 @@ function guard(fn, wait = 400) {
     };
 }
 
-function showToast(message, type = "success") {
-    const toast = $("toast");
-    const text = $("toastMessage");
-    const icon = $("toastIcon");
-
-    if (!toast) {
-        console.log(`[${type}] ${message}`);
-        return;
-    }
-
-    if (text) {
-        text.textContent = message;
-    }
-
-    if (icon) {
-        icon.textContent = type === "error" ? "!" : "✓";
-    }
-
-    toast.classList.add("show");
-
-    setTimeout(() => {
-        toast.classList.remove("show");
-    }, 2500);
+/** Get the string name from a group object or string */
+function getGroupName(group) {
+    if (typeof group === 'string') return group;
+    if (group && typeof group === 'object')
+        return group.name || group.groupname || group.group || '';
+    return '';
 }
 
-function updateNetworkStatus(status) {
-    const element = $("networkStatus");
-
-    if (element) {
-        element.textContent = status;
-    }
-}
-
-function clearMessage(id) {
-    const element = $(id);
-
-    if (element) {
-        element.textContent = "";
-        element.className = "auth-message";
-    }
-}
-
-function setMessage(id, message, type = "error") {
-    const element = $(id);
-
-    if (!element) return;
-
-    element.textContent = message;
-    element.className = "auth-message";
-
-    if (type === "success") {
-        element.classList.add("success");
-    } else {
-        element.classList.add("error");
-    }
-}
-
-function extractErrorMessage(data, fallback = "An error occurred.") {
-    if (typeof data === "string" && data) return data;
-
-    if (data && typeof data === "object") {
-        return data.message || data.error || fallback;
-    }
-
-    return fallback;
-}
-
+/** Get group name from an event data object */
 function getGroupFromData(data) {
-    return (
-        (data && (data.group || data.groupname || data.name)) ||
-        ""
-    );
+    return (data && (data.group || data.groupname || data.name)) || '';
 }
 
+/** Normalize a member to a string name */
 function getMemberName(member) {
-    if (typeof member === "string") {
-        return member;
-    }
-
-    if (member && typeof member === "object") {
-        return (
-            member.username ||
-            member.user ||
-            member.name ||
-            member.member ||
-            ""
-        );
-    }
-
-    return "";
+    if (typeof member === 'string') return member;
+    if (member && typeof member === 'object')
+        return member.username || member.user || member.name || member.member || '';
+    return '';
 }
 
 function normalizeNames(list) {
     if (!Array.isArray(list)) return [];
-
-    return list
-        .map(getMemberName)
-        .filter(name => !!name);
+    return list.map(getMemberName).filter(Boolean);
 }
 
-function parseTimestamp(timestamp) {
-    if (!timestamp) return null;
-
-    if (timestamp instanceof Date) {
-        return isNaN(timestamp.getTime()) ? null : timestamp;
+/** Parse ISO / SQLite timestamp strings into a Date object */
+function parseTimestamp(ts) {
+    if (!ts) return null;
+    if (ts instanceof Date) return isNaN(ts.getTime()) ? null : ts;
+    if (typeof ts === 'number') {
+        const d = new Date(ts < 1e12 ? ts * 1000 : ts);
+        return isNaN(d.getTime()) ? null : d;
     }
-
-    let value = timestamp;
-
-    if (typeof value === "number") {
-        // Seconds vs milliseconds
-        if (value < 1e12) value = value * 1000;
-        const fromNumber = new Date(value);
-        return isNaN(fromNumber.getTime()) ? null : fromNumber;
-    }
-
-    value = String(value).trim();
-
-    // "2026-10-07 12:30:45" -> "2026-10-07T12:30:45"
-    if (/^\d{4}-\d{2}-\d{2} \d/.test(value)) {
-        value = value.replace(" ", "T");
-    }
-
-    const parsed = new Date(value);
-
-    return isNaN(parsed.getTime()) ? null : parsed;
+    let s = String(ts).trim();
+    if (/^\d{4}-\d{2}-\d{2} \d/.test(s)) s = s.replace(' ', 'T');
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
 }
 
-function ensureSocketLibrary() {
-    if (typeof io === "undefined") {
-        console.error("Socket.IO client library (io) is not loaded.");
-        showToast("Socket.IO library failed to load", "error");
-        return false;
-    }
-
-    return true;
+function extractErrorMessage(data, fallback = 'An error occurred.') {
+    if (typeof data === 'string' && data) return data;
+    if (data && typeof data === 'object')
+        return data.message || data.error || fallback;
+    return fallback;
 }
 
-// Single place where the Socket.IO connection is created.
+function clearSession() {
+    localStorage.removeItem(USERNAME_KEY);
+    localStorage.removeItem(TOKEN_KEY);
+}
+
+function returnToLogin(message) {
+    if (message) showToast(message, 'error');
+    clearSession();
+    setTimeout(() => { window.location.href = '/'; }, 1500);
+}
+
+
+// ============================================================
+// TOAST
+// ============================================================
+
+let _toastTimer = null;
+
+function showToast(message, type = 'success') {
+    const toast = $('toast');
+    const text  = $('toastMessage');
+    const icon  = $('toastIcon');
+
+    if (!toast) { console.log(`[${type}]`, message); return; }
+
+    if (text) text.textContent = message;
+    if (icon) icon.textContent = type === 'error' ? '✕' : '✓';
+
+    // reset classes
+    toast.className = 'toast show';
+    if (type === 'error') toast.classList.add('error');
+
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+
+// ============================================================
+// NETWORK STATUS
+// ============================================================
+
+function setNetworkStatus(label, connected) {
+    const el = $('networkStatus');
+    if (!el) return;
+    el.textContent = label;
+    el.className = connected ? 'connected' : 'disconnected';
+}
+
+
+// ============================================================
+// AUTH MESSAGE HELPERS (login/register page)
+// ============================================================
+
+function clearMessage(id) {
+    const el = $(id);
+    if (el) { el.textContent = ''; el.className = 'auth-message'; }
+}
+
+function setMessage(id, message, type = 'error') {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = message;
+    el.className   = `auth-message ${type === 'success' ? 'success' : 'error'}`;
+}
+
+
+// ============================================================
+// LOGIN / REGISTER TAB SWITCHING
+// ============================================================
+
+function showLogin() {
+    $('loginForm')   ?.classList.remove('hidden');
+    $('registerForm')?.classList.add('hidden');
+    $('loginTab')    ?.classList.add('active');
+    $('registerTab') ?.classList.remove('active');
+    clearMessage('registerMessage');
+    $('loginUsername')?.focus();
+}
+
+function showRegister() {
+    $('registerForm')?.classList.remove('hidden');
+    $('loginForm')   ?.classList.add('hidden');
+    $('registerTab') ?.classList.add('active');
+    $('loginTab')    ?.classList.remove('active');
+    clearMessage('loginMessage');
+    $('registerUsername')?.focus();
+}
+
+
+// ============================================================
+// SOCKET CREATION – exactly one socket per page
+// ============================================================
+
 function createSocket() {
+    if (socket) return socket;
 
-    if (socket) {
-        return socket;
-    }
-
-    if (!ensureSocketLibrary()) {
+    if (typeof io === 'undefined') {
+        showToast('Socket.IO library failed to load.', 'error');
+        console.error('[SecureChat] io is undefined – CDN load failed?');
         return null;
     }
 
     socket = io(window.location.origin, {
-        transports: ["websocket"],
+        transports: ['websocket'],
         reconnection: true,
-        reconnectionAttempts: 10,
-        timeout: 10000
+        reconnectionAttempts: 20,
+        reconnectionDelay: 1000,
+        timeout: 12000,
     });
 
     return socket;
@@ -207,106 +220,52 @@ function createSocket() {
 
 
 // ============================================================
-// LOGIN / REGISTER TABS
-// ============================================================
-
-function showLogin() {
-    $("loginForm")?.classList.remove("hidden");
-    $("registerForm")?.classList.add("hidden");
-
-    $("loginTab")?.classList.add("active");
-    $("registerTab")?.classList.remove("active");
-
-    clearMessage("registerMessage");
-}
-
-function showRegister() {
-    $("registerForm")?.classList.remove("hidden");
-    $("loginForm")?.classList.add("hidden");
-
-    $("registerTab")?.classList.add("active");
-    $("loginTab")?.classList.remove("active");
-
-    clearMessage("loginMessage");
-}
-
-
-// ============================================================
-// AUTH SOCKET
+// AUTH SOCKET  (index.html only)
 // ============================================================
 
 function connectAuthSocket() {
-
     const s = createSocket();
-
-    if (!s) {
-        return null;
-    }
-
-    if (authHandlersBound) {
-        return s;
-    }
-
+    if (!s) return null;
+    if (authHandlersBound) return s;
     authHandlersBound = true;
 
-    s.on("connect", () => {
-        console.log("Auth socket connected:", s.id);
+    s.on('connect', () => {
+        console.log('[Auth] connected', s.id);
     });
 
-    s.on("connect_error", error => {
-        console.error("Auth socket connect error:", error);
+    s.on('connect_error', err => {
+        console.error('[Auth] connect error', err);
+        setMessage('loginMessage', 'Cannot reach server. Is it running?', 'error');
     });
 
-    s.on("register_success", data => {
-
-        setMessage(
-            "registerMessage",
-            data?.message || "Registration successful!",
-            "success"
-        );
-
-        setTimeout(() => {
-            showLogin();
-        }, 1000);
+    // ── Register ──────────────────────────────────────────
+    s.on('register_success', data => {
+        setMessage('registerMessage', data?.message || 'Registration successful!', 'success');
+        setTimeout(showLogin, 1200);
     });
 
-    s.on("register_error", data => {
-
-        setMessage(
-            "registerMessage",
-            data?.message || "Registration failed.",
-            "error"
-        );
+    s.on('register_error', data => {
+        setMessage('registerMessage', extractErrorMessage(data, 'Registration failed.'), 'error');
     });
 
-    s.on("login_success", data => {
-
+    // ── Login ──────────────────────────────────────────────
+    s.on('login_success', data => {
         currentUser = data?.username;
-
         if (!currentUser) {
-            setMessage(
-                "loginMessage",
-                "Login failed: no username returned.",
-                "error"
-            );
+            setMessage('loginMessage', 'Login failed: no username returned.', 'error');
             return;
         }
-
-        localStorage.setItem(
-            "securechat_username",
-            currentUser
-        );
-
-        window.location.href = "/chat";
+        localStorage.setItem(USERNAME_KEY, currentUser);
+        localStorage.setItem(TOKEN_KEY, data.token || '');
+        // navigate to chat; socket is left open so the GRACE_SECONDS timer
+        // in the server doesn't fire before attach succeeds.
+        window.location.href = '/chat';
     });
 
-    s.on("login_error", data => {
-
-        setMessage(
-            "loginMessage",
-            data?.message || "Invalid username or password.",
-            "error"
-        );
+    s.on('login_error', data => {
+        setMessage('loginMessage', extractErrorMessage(data, 'Invalid username or password.'), 'error');
+        const btn = $('loginButton');
+        if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
     });
 
     return s;
@@ -314,720 +273,331 @@ function connectAuthSocket() {
 
 
 // ============================================================
-// REGISTER
+// AUTH ACTIONS
 // ============================================================
 
 function registerUser() {
-
-    const username =
-        $("registerUsername")?.value.trim();
-
-    const password =
-        $("registerPassword")?.value;
+    const username = $('registerUsername')?.value.trim();
+    const password = $('registerPassword')?.value;
 
     if (!username || !password) {
-
-        setMessage(
-            "registerMessage",
-            "Please enter username and password.",
-            "error"
-        );
-
+        setMessage('registerMessage', 'Please fill in username and password.', 'error');
         return;
     }
 
+    clearMessage('registerMessage');
     const s = connectAuthSocket();
-
     if (!s) return;
 
-    s.emit("register", {
-        username: username,
-        password: password
-    });
+    s.emit('register', { username, password });
 }
-
-
-// ============================================================
-// LOGIN
-// ============================================================
 
 function login() {
-
-    const username =
-        $("loginUsername")?.value.trim();
-
-    const password =
-        $("loginPassword")?.value;
+    const username = $('loginUsername')?.value.trim();
+    const password = $('loginPassword')?.value;
 
     if (!username || !password) {
-
-        setMessage(
-            "loginMessage",
-            "Please enter username and password.",
-            "error"
-        );
-
+        setMessage('loginMessage', 'Please fill in username and password.', 'error');
         return;
     }
 
+    clearMessage('loginMessage');
+
+    const btn = $('loginButton');
+    if (btn) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+
     const s = connectAuthSocket();
+    if (!s) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
+        return;
+    }
 
-    if (!s) return;
-
-    s.emit("login", {
-        username: username,
-        password: password
-    });
+    s.emit('login', { username, password });
 }
 
 
 // ============================================================
-// CHAT INITIALIZATION
+// CHAT INITIALIZATION  (chat.html only)
 // ============================================================
 
 function initializeChat() {
+    currentUser = localStorage.getItem(USERNAME_KEY);
+    const token = localStorage.getItem(TOKEN_KEY);
 
-    currentUser =
-        localStorage.getItem("securechat_username");
-
-    if (!currentUser) {
-        window.location.href = "/";
+    if (!currentUser || !token) {
+        clearSession();
+        window.location.href = '/';
         return;
     }
 
-    if ($("currentUsername")) {
-        $("currentUsername").textContent =
-            currentUser;
-    }
-
-    if ($("myAvatar")) {
-        $("myAvatar").textContent =
-            currentUser.charAt(0).toUpperCase();
-    }
+    // Update sidebar header
+    const avatar = $('myAvatar');
+    if (avatar) avatar.textContent = currentUser.charAt(0).toUpperCase();
+    const nameEl = $('currentUsername');
+    if (nameEl) nameEl.textContent = currentUser;
 
     connectChatSocket();
 }
 
 
 // ============================================================
-// CHAT SOCKET
+// CHAT SOCKET  (chat.html only)
 // ============================================================
 
 function connectChatSocket() {
-
     const s = createSocket();
-
-    if (!s) {
-        return null;
-    }
-
-    // Handlers are registered exactly once per socket.
-    if (chatHandlersBound) {
-        return s;
-    }
-
+    if (!s) return null;
+    if (chatHandlersBound) return s;
     chatHandlersBound = true;
 
 
-    // ========================================================
-    // CONNECTION
-    // ========================================================
+    // ── Connection lifecycle ───────────────────────────────
+    s.on('connect', () => {
+        console.log('[Chat] connected', s.id);
+        setNetworkStatus('Connected', true);
 
-    s.on("connect", () => {
-
-        console.log(
-            "Chat socket connected:",
-            s.id
-        );
-
-        updateNetworkStatus("Connected");
-
-        // Runs on every (re)connect so the session is re-attached.
-        s.emit("attach", {
-            username: currentUser
+        // Re-attach on every (re)connect so the session survives page refresh.
+        s.emit('attach', {
+            username: currentUser,
+            token:    localStorage.getItem(TOKEN_KEY),
         });
-
-        s.emit("get_users");
-        s.emit("get_groups");
     });
 
-    s.on("disconnect", reason => {
-
-        updateNetworkStatus("Disconnected");
-
-        console.log(
-            "Chat socket disconnected:",
-            reason
-        );
+    s.on('disconnect', reason => {
+        console.warn('[Chat] disconnected', reason);
+        setNetworkStatus('Disconnected', false);
     });
 
-    s.on("connect_error", error => {
-
-        updateNetworkStatus("Connection error");
-
-        console.error(
-            "Chat socket connect error:",
-            error
-        );
+    s.on('connect_error', err => {
+        console.error('[Chat] connect error', err);
+        setNetworkStatus('Connection error', false);
     });
 
-    s.on("attach_success", data => {
-
-        console.log(
-            "ATTACH SUCCESS:",
-            data
-        );
-
-        updateNetworkStatus("Connected");
-
-        // Refresh once the server confirms our session.
-        s.emit("get_users");
-        s.emit("get_groups");
-
-        if (currentGroup) {
-            loadGroupMembers(currentGroup);
-        }
+    s.on('reconnect_attempt', n => {
+        setNetworkStatus(`Reconnecting (${n})…`, false);
     });
 
-    s.on("key_success", data => {
+    // ── Attach ────────────────────────────────────────────
+    s.on('attach_success', data => {
+        console.log('[Chat] attach_success', data);
+        setNetworkStatus('Connected', true);
 
-        console.log(
-            "KEY SUCCESS:",
-            data
-        );
+        s.emit('get_users');
+        s.emit('get_groups');
+        s.emit('get_all_users');
 
-        if (data?.message) {
-            showToast(data.message);
-        }
+        if (currentGroup) loadGroupMembers(currentGroup);
+    });
+
+    s.on('attach_error', data => {
+        console.error('[Chat] attach_error', data);
+        returnToLogin(extractErrorMessage(data, 'Session expired. Please log in again.'));
+    });
+
+    s.on('session_closed', data => {
+        console.error('[Chat] session_closed', data);
+        returnToLogin(extractErrorMessage(data, 'Connection to the chat server was lost.'));
+    });
+
+    s.on('server_shutdown', () => {
+        returnToLogin('The chat server was shut down.');
+    });
+
+    s.on('key_success', data => {
+        console.log('[Chat] key_success', data);
     });
 
 
-    // ========================================================
-    // USERS
-    // ========================================================
-
-    s.on("users", data => {
-
-        const list =
-            Array.isArray(data)
-                ? data
-                : Array.isArray(data?.users)
-                    ? data.users
-                    : [];
-
+    // ── Online Users  (from /users command) ───────────────
+    // Payload:  { users: ["alice", "bob", ...] }
+    s.on('users', data => {
+        const list = Array.isArray(data) ? data
+                   : Array.isArray(data?.users) ? data.users : [];
         onlineUsers = normalizeNames(list);
-
         renderUsers();
+        populateAddMemberSelect();
+        updateNetworkClients();
+    });
 
+    // ── All Registered Users (from /allusers) ─────────────
+    // Payload: { users: [...] }
+    s.on('all_users', data => {
+        const list = Array.isArray(data) ? data
+                   : Array.isArray(data?.users) ? data.users : [];
+        allUsers = normalizeNames(list);
+        renderUsers();
         populateAddMemberSelect();
     });
 
 
-    // ========================================================
-    // GROUPS
-    // ========================================================
+    // ── Groups this user belongs to ───────────────────────
+    // Payload: { groups: ["team", "general", ...] }
+    s.on('groups', data => {
+        groups = Array.isArray(data) ? data
+               : Array.isArray(data?.groups) ? data.groups : [];
 
-    s.on("groups", data => {
+        const count = $('groupCount');
+        if (count) count.textContent = groups.length;
 
-        groups =
-            Array.isArray(data)
-                ? data
-                : Array.isArray(data?.groups)
-                    ? data.groups
-                    : [];
-
-        if ($("groupCount")) {
-            $("groupCount").textContent =
-                groups.length;
+        // If the open group was removed from our list, close it.
+        if (
+            currentMode === 'group' &&
+            currentGroup &&
+            !groups.some(g => getGroupName(g) === currentGroup)
+        ) {
+            currentGroup = null;
+            currentMode  = null;
+            clearChatScreen();
+            closeGroupInfo();
         }
 
         renderGroups();
     });
 
 
-    // ========================================================
-    // PRIVATE MESSAGE
-    // ========================================================
-
-    s.on("message", data => {
-
+    // ── Private Message ───────────────────────────────────
+    // Payload: { sender, message_id, message, timestamp }
+    s.on('message', data => {
         if (!data) return;
-
-        const sender =
-            data.sender || "Unknown";
-
-        const message =
-            data.message || "";
-
+        const sender  = data.sender  || 'Unknown';
+        const message = data.message || '';
         if (!message) return;
 
-        // Ignore echoes of our own messages (already displayed).
-        if (sameUser(sender, currentUser)) {
-            return;
-        }
+        // Ignore own echoes (we add the bubble optimistically on send).
+        if (sameUser(sender, currentUser)) return;
 
-        if (
-            currentMode === "private" &&
-            sameUser(currentChatUser, sender)
-        ) {
-
-            addMessage(
-                sender,
-                message,
-                false,
-                data.timestamp
-            );
-
+        if (currentMode === 'private' && sameUser(currentChatUser, sender)) {
+            addMessage(sender, message, false, data.timestamp);
         } else {
-
-            showToast(
-                `New message from ${sender}`
-            );
+            showToast(`💬 New message from ${sender}`);
         }
     });
 
-
-    // ========================================================
-    // PRIVATE HISTORY
-    // ========================================================
-
-    s.on("history", data => {
-
-        console.log(
-            "HISTORY RECEIVED:",
-            data
-        );
-
+    // ── Private History ───────────────────────────────────
+    // Payload: { with: "peer", history: [{sender,receiver,message,timestamp},...] }
+    s.on('history', data => {
+        console.log('[Chat] history received', data);
         showPrivateHistory(data);
     });
 
 
-    // ========================================================
-    // GROUP MESSAGE
-    // ========================================================
-
-    s.on("group_message", data => {
-
-        console.log(
-            "GROUP MESSAGE RECEIVED:",
-            data
-        );
-
+    // ── Group Message ─────────────────────────────────────
+    // Payload: { group, sender, message, timestamp }
+    s.on('group_message', data => {
         if (!data) return;
-
-        const group =
-            getGroupFromData(data);
-
-        const sender =
-            data.sender ||
-            "Unknown";
-
-        const message =
-            data.message ||
-            "";
-
+        const group   = getGroupFromData(data);
+        const sender  = data.sender  || 'Unknown';
+        const message = data.message || '';
         if (!message) return;
 
-        /*
-         * Only display a group message in the currently
-         * opened group. Messages from other groups still
-         * generate a notification.
-         */
-
-        if (
-            currentMode === "group" &&
-            currentGroup === group
-        ) {
-
-            /*
-             * Do not display our own message twice.
-             * We already display it immediately when sending.
-             */
+        if (currentMode === 'group' && currentGroup === group) {
+            // Own messages are shown optimistically on send.
             if (!sameUser(sender, currentUser)) {
-
-                addMessage(
-                    sender,
-                    message,
-                    false,
-                    data.timestamp
-                );
+                addMessage(sender, message, false, data.timestamp);
             }
-
         } else if (!sameUser(sender, currentUser)) {
-
-            showToast(
-                `New message in ${group}`
-            );
+            showToast(`👥 New message in ${group}`);
         }
     });
 
-
-    // ========================================================
-    // GROUP HISTORY
-    // ========================================================
-
-    s.on("group_history", data => {
-
-        console.log(
-            "GROUP HISTORY RECEIVED:",
-            data
-        );
-
+    // ── Group History ─────────────────────────────────────
+    // Payload: { group, history: [{timestamp,sender,message},...] }
+    s.on('group_history', data => {
+        console.log('[Chat] group_history received', data);
         showGroupHistory(data);
     });
 
 
-    // ========================================================
-    // GROUP CREATED
-    // ========================================================
+    // ── Group Lifecycle ───────────────────────────────────
+    s.on('group_created', data => {
+        const group = getGroupFromData(data);
+        if (group) showToast(`Group "${group}" created`);
+        loadGroups();
+    });
 
-    s.on("group_created", data => {
+    s.on('joined',      () => loadGroups());
+    s.on('group_joined',() => loadGroups());
 
-        console.log(
-            "GROUP CREATED:",
-            data
-        );
+    s.on('left',       data => handleLeftGroup(getGroupFromData(data)));
+    s.on('group_left', data => handleLeftGroup(getGroupFromData(data)));
 
-        const group =
-            getGroupFromData(data);
-
-        if (group) {
-            showToast(
-                `Group "${group}" created`
-            );
+    s.on('group_updated', data => {
+        const group = getGroupFromData(data);
+        loadGroups();
+        if (Array.isArray(data?.members)) {
+            handleMembersData({
+                group:   group || currentGroup,
+                admin:   data.admin,
+                members: data.members,
+            });
+            return;
         }
-
-        loadGroups();
-    });
-
-
-    // ========================================================
-    // GROUP JOINED
-    // ========================================================
-
-    s.on("group_joined", data => {
-
-        console.log(
-            "GROUP JOINED:",
-            data
-        );
-
-        const group =
-            getGroupFromData(data);
-
-        if (group) {
-            showToast(
-                `Joined ${group}`
-            );
+        if (currentGroup && (!group || group === currentGroup)) {
+            loadGroupMembers(currentGroup);
         }
-
-        loadGroups();
     });
 
 
-    // ========================================================
-    // GENERIC JOINED EVENT
-    // ========================================================
-
-    s.on("joined", data => {
-
-        console.log(
-            "JOINED:",
-            data
-        );
-
-        loadGroups();
-    });
-
-
-    // ========================================================
-    // GROUP LEFT
-    // ========================================================
-
-    s.on("group_left", data => {
-
-        console.log(
-            "GROUP LEFT:",
-            data
-        );
-
-        handleLeftGroup(
-            getGroupFromData(data)
-        );
-    });
-
-
-    // ========================================================
-    // GENERIC LEFT
-    // ========================================================
-
-    s.on("left", data => {
-
-        console.log(
-            "LEFT GROUP:",
-            data
-        );
-
-        handleLeftGroup(
-            getGroupFromData(data)
-        );
-    });
-
-
-    // ========================================================
-    // MEMBERS
-    // ========================================================
-
-    s.on("members", data => {
-
-        console.log(
-            "MEMBERS RECEIVED:",
-            data
-        );
-
+    // ── Members ───────────────────────────────────────────
+    // Payload: { group, admin, members: [string,...] }
+    s.on('members', data => {
+        console.log('[Chat] members received', data);
         handleMembersData(data);
     });
 
-
-    // ========================================================
-    // GROUP UPDATED
-    // ========================================================
-
-    s.on("group_updated", data => {
-
-        console.log(
-            "GROUP UPDATED:",
-            data
-        );
-
-        const group =
-            getGroupFromData(data);
-
-        loadGroups();
-
-        // If the server included the member list, apply it.
-        if (Array.isArray(data?.members)) {
-
-            handleMembersData({
-                group: group || currentGroup,
-                members: data.members
-            });
-
-            return;
-        }
-
-        if (
-            currentGroup &&
-            (!group || group === currentGroup)
-        ) {
-            loadGroupMembers(currentGroup);
-        }
-    });
-
-
-    // ========================================================
-    // MEMBER ADDED
-    // ========================================================
-
-    s.on("member_added", data => {
-
-        console.log(
-            "MEMBER ADDED:",
-            data
-        );
-
-        const group =
-            getGroupFromData(data);
-
-        const username =
-            data?.username ||
-            data?.member ||
-            "";
-
-        if (username && sameUser(username, currentUser)) {
-
-            showToast(
-                `You were added to ${group || "a group"}`
-            );
-
+    s.on('member_added', data => {
+        const group    = getGroupFromData(data);
+        const username = data?.username || data?.member || '';
+        if (sameUser(username, currentUser)) {
+            showToast(`You were added to ${group || 'a group'}`);
         } else if (username) {
-
-            showToast(
-                `${username} added to ${group}`
-            );
-
-        } else {
-
-            showToast(
-                `Member added to ${group}`
-            );
+            showToast(`${username} added to ${group}`);
         }
-
         loadGroups();
-
-        if (
-            currentGroup &&
-            (!group || currentGroup === group)
-        ) {
-
+        if (currentGroup && (!group || currentGroup === group)) {
             loadGroupMembers(currentGroup);
         }
     });
 
-
-    // ========================================================
-    // MEMBER REMOVED
-    // ========================================================
-
-    s.on("member_removed", data => {
-
-        console.log(
-            "MEMBER REMOVED:",
-            data
-        );
-
-        const group =
-            getGroupFromData(data);
-
-        const username =
-            data?.username ||
-            data?.member ||
-            "";
-
-        if (username) {
-
-            showToast(
-                `${username} removed from ${group}`
-            );
+    s.on('member_removed', data => {
+        const group    = getGroupFromData(data);
+        const username = data?.username || data?.member || '';
+        if (sameUser(username, currentUser)) {
+            showToast(`You were removed from ${group}`, 'error');
+        } else if (username) {
+            showToast(`${username} removed from ${group}`);
         }
-
-        /*
-         * If THIS user was removed from the group,
-         * immediately close the group.
-         */
-
-        if (
-            sameUser(username, currentUser) &&
-            currentGroup === group
-        ) {
-
+        if (sameUser(username, currentUser) && currentGroup === group) {
             currentGroup = null;
-            currentMode = null;
-
+            currentMode  = null;
             delete groupMembers[group];
-
+            delete groupAdmins[group];
             clearChatScreen();
             closeGroupInfo();
-
-        } else if (
-            currentGroup &&
-            (!group || currentGroup === group)
-        ) {
-
+        } else if (currentGroup && (!group || currentGroup === group)) {
             loadGroupMembers(currentGroup);
         }
-
         loadGroups();
     });
 
 
-    // ========================================================
-    // ACKNOWLEDGEMENTS
-    // ========================================================
+    // ── Acknowledgements ──────────────────────────────────
+    s.on('sent', () => { /* message delivered to server */ });
+    s.on('ack',  () => { /* server ACK received */ });
 
-    s.on("sent", data => {
 
-        console.log(
-            "SENT:",
-            data
-        );
+    // ── Errors & Notifications ────────────────────────────
+    s.on('error',         data => showToast(extractErrorMessage(data), 'error'));
+    s.on('server_error',  data => showToast(extractErrorMessage(data), 'error'));
+    s.on('error_message', data => showToast(extractErrorMessage(data), 'error'));
+
+    s.on('server', data => {
+        if (data?.message) showToast(data.message);
     });
-
-    s.on("ack", data => {
-
-        console.log(
-            "ACK:",
-            data
-        );
+    s.on('server_message', data => {
+        const t = extractErrorMessage(data, '');
+        if (t) showToast(t);
     });
-
-
-    // ========================================================
-    // SERVER ERRORS / NOTIFICATIONS
-    // ========================================================
-
-    s.on("error", data => {
-
-        console.error(
-            "SERVER ERROR:",
-            data
-        );
-
-        showToast(
-            extractErrorMessage(data),
-            "error"
-        );
-    });
-
-    s.on("server_error", data => {
-
-        console.error(
-            "SERVER_ERROR:",
-            data
-        );
-
-        showToast(
-            extractErrorMessage(data),
-            "error"
-        );
-    });
-
-    s.on("error_message", data => {
-
-        console.error(
-            "ERROR_MESSAGE:",
-            data
-        );
-
-        showToast(
-            extractErrorMessage(data),
-            "error"
-        );
-    });
-
-    s.on("server", data => {
-
-        console.log(
-            "SERVER:",
-            data
-        );
-
-        if (data?.message) {
-
-            showToast(
-                data.message
-            );
-        }
-    });
-
-    s.on("server_message", data => {
-
-        console.log(
-            "SERVER_MESSAGE:",
-            data
-        );
-
-        const text =
-            extractErrorMessage(data, "");
-
-        if (text) {
-
-            showToast(
-                text
-            );
-        }
-    });
-
 
     return s;
 }
@@ -1038,23 +608,16 @@ function connectChatSocket() {
 // ============================================================
 
 function handleLeftGroup(group) {
-
     if (group) {
         delete groupMembers[group];
+        delete groupAdmins[group];
     }
-
-    if (
-        currentGroup &&
-        (!group || currentGroup === group)
-    ) {
-
+    if (currentGroup && (!group || currentGroup === group)) {
         currentGroup = null;
-        currentMode = null;
-
+        currentMode  = null;
         clearChatScreen();
         closeGroupInfo();
     }
-
     loadGroups();
 }
 
@@ -1063,624 +626,197 @@ function handleLeftGroup(group) {
 // USERS UI
 // ============================================================
 
+function updateNetworkClients() {
+    const el = $('networkClients');
+    if (el) el.textContent = onlineUsers.length;
+}
+
 function renderUsers() {
-
-    const container =
-        $("usersList");
-
+    const container = $('usersList');
     if (!container) return;
 
-    container.innerHTML = "";
+    // Only show users who are currently online (excluding yourself).
+    const online = onlineUsers.filter(u => !sameUser(u, currentUser));
 
-    const users =
-        onlineUsers.filter(
-            user => !sameUser(user, currentUser)
-        );
+    const countEl = $('onlineCount');
+    if (countEl) countEl.textContent = online.length;
 
-    if ($("onlineCount")) {
+    updateNetworkClients();
 
-        $("onlineCount").textContent =
-            users.length;
+    // Update subtitle for open private chat
+    if (currentMode === 'private' && currentChatUser) {
+        const subtitle = $('chatSubtitle');
+        const isOnline = onlineUsers.some(u => sameUser(u, currentChatUser));
+        if (subtitle) {
+            subtitle.textContent = isOnline
+                ? 'Private · 🟢 Online'
+                : 'Private · ⚫ Offline';
+        }
     }
 
-    if ($("networkClients")) {
+    container.innerHTML = '';
 
-        $("networkClients").textContent =
-            onlineUsers.length;
-    }
-
-    // Online / offline status of the open private chat
-    if (
-        currentMode === "private" &&
-        currentChatUser &&
-        $("chatSubtitle")
-    ) {
-
-        const isOnline =
-            onlineUsers.some(
-                user => sameUser(user, currentChatUser)
-            );
-
-        $("chatSubtitle").textContent =
-            isOnline
-                ? "Private conversation · Online"
-                : "Private conversation · Offline";
-    }
-
-    if (users.length === 0) {
-
-        container.innerHTML = `
-            <div class="empty-list">
-                No other users online
-            </div>
-        `;
-
+    if (online.length === 0) {
+        container.innerHTML = '<div class="empty-list">No other users online</div>';
         return;
     }
 
-    users.forEach(user => {
+    online.forEach(user => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'user-item';
+        if (currentMode === 'private' && sameUser(currentChatUser, user))
+            btn.classList.add('selected');
 
-        const button =
-            document.createElement("button");
-
-        button.type = "button";
-
-        button.className =
-            "user-item";
-
-        if (
-            currentMode === "private" &&
-            currentChatUser === user
-        ) {
-
-            button.classList.add(
-                "selected"
-            );
-        }
-
-        button.innerHTML = `
+        const initial = user.charAt(0).toUpperCase();
+        btn.innerHTML = `
+            <div class="user-avatar-sm">${escapeHtml(initial)}</div>
             <span class="user-dot"></span>
-            <span>${escapeHtml(user)}</span>
-        `;
-
-        button.onclick = () => {
-
-            openPrivateChat(user);
-        };
-
-        container.appendChild(button);
+            <span>${escapeHtml(user)}</span>`;
+        btn.onclick = () => openPrivateChat(user);
+        container.appendChild(btn);
     });
 }
 
 
 // ============================================================
-// PRIVATE CHAT
+// GROUPS UI
+// ============================================================
+
+function renderGroups() {
+    const container = $('groupsList');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (groups.length === 0) {
+        container.innerHTML = '<div class="empty-list">No groups yet. Create one!</div>';
+        return;
+    }
+
+    groups.forEach(g => {
+        const name = getGroupName(g);
+        if (!name) return;
+
+        const btn = document.createElement('button');
+        btn.type      = 'button';
+        btn.className = 'group-item';
+        if (currentMode === 'group' && currentGroup === name)
+            btn.classList.add('selected');
+
+        btn.innerHTML = `
+            <div class="group-icon">👥</div>
+            <span>${escapeHtml(name)}</span>`;
+        btn.onclick = () => openGroup(name);
+        container.appendChild(btn);
+    });
+}
+
+function loadGroups() {
+    if (socket && socket.connected) socket.emit('get_groups');
+}
+
+
+// ============================================================
+// OPEN PRIVATE CHAT
 // ============================================================
 
 function openPrivateChat(username) {
-
     if (!username) return;
 
     currentChatUser = username;
-    currentGroup = null;
-    currentMode = "private";
+    currentGroup    = null;
+    currentMode     = 'private';
 
-    if ($("chatTitle")) {
-        $("chatTitle").textContent =
-            username;
+    // Header
+    const title    = $('chatTitle');
+    const subtitle = $('chatSubtitle');
+    const avatarEl = $('chatAvatarEl');
+
+    if (title)    title.textContent    = username;
+    if (subtitle) subtitle.textContent = 'Private · loading…';
+    if (avatarEl) {
+        avatarEl.textContent = username.charAt(0).toUpperCase();
+        avatarEl.className   = 'chat-avatar';
     }
 
-    if ($("chatSubtitle")) {
-        $("chatSubtitle").textContent =
-            "Private conversation";
-    }
+    $('groupInfoBtn')       ?.classList.add('hidden');
+    $('welcomeScreen')      ?.classList.add('hidden');
+    $('messagesContainer')  ?.classList.remove('hidden');
+    $('messageArea')        ?.classList.remove('hidden');
 
-    $("groupInfoBtn")
-        ?.classList.add("hidden");
-
-    $("welcomeScreen")
-        ?.classList.add("hidden");
-
-    $("messagesContainer")
-        ?.classList.remove("hidden");
-
-    $("messageArea")
-        ?.classList.remove("hidden");
-
-    if ($("messages")) {
-        $("messages").innerHTML = "";
-    }
+    const msgs = $('messages');
+    if (msgs) msgs.innerHTML = '<div class="empty-list">Loading history…</div>';
 
     renderUsers();
     renderGroups();
-
     loadPrivateHistory(username);
 }
 
-
 function loadPrivateHistory(username) {
-
-    if (!socket || !socket.connected) {
-        return;
-    }
-
-    /*
-     * The web_server.py bridge translates this into
-     * the TCP /history command.
-     */
-
-    socket.emit(
-        "history",
-        {
-            username: username
-        }
-    );
+    if (!socket || !socket.connected) return;
+    // web_server.py translates this to the TCP /history command.
+    socket.emit('get_history', { username });
 }
 
 
+// ============================================================
+// SHOW PRIVATE HISTORY
+// ============================================================
+
 function getHistoryItems(data) {
-
-    if (Array.isArray(data)) {
-        return data;
-    }
-
-    if (Array.isArray(data?.history)) {
-        return data.history;
-    }
-
-    if (Array.isArray(data?.messages)) {
-        return data.messages;
-    }
-
+    if (Array.isArray(data))           return data;
+    if (Array.isArray(data?.history))  return data.history;
+    if (Array.isArray(data?.messages)) return data.messages;
     return [];
 }
 
-
 function showPrivateHistory(data) {
+    if (currentMode !== 'private') return;
 
-    // Only render history into an open private conversation.
-    if (currentMode !== "private") {
-        return;
-    }
+    // Only render if the history matches the currently open conversation.
+    const peer = (!Array.isArray(data))
+        ? (data?.with || data?.username || data?.user || '')
+        : '';
 
-    // Ignore history for a different conversation if the server says which.
-    const peer =
-        data && !Array.isArray(data)
-            ? (data.username || data.with || data.user || "")
-            : "";
-
-    if (
-        peer &&
-        currentChatUser &&
+    if (peer && currentChatUser &&
         !sameUser(peer, currentChatUser) &&
-        !sameUser(peer, currentUser)
-    ) {
+        !sameUser(peer, currentUser)) return;
+
+    const msgs = $('messages');
+    if (!msgs) return;
+    msgs.innerHTML = '';
+
+    const items = getHistoryItems(data);
+
+    if (items.length === 0) {
+        msgs.innerHTML = '<div class="empty-list">No messages yet. Say hello!</div>';
         return;
     }
 
-    const messages =
-        $("messages");
+    // Group messages by date for date dividers.
+    let lastDate = '';
 
-    if (!messages) return;
-
-    messages.innerHTML = "";
-
-    getHistoryItems(data).forEach(item => {
-
-        let sender;
-        let message;
-        let timestamp;
+    items.forEach(item => {
+        let sender, message, timestamp;
 
         if (Array.isArray(item)) {
-
-            // [timestamp, sender, message]
-            timestamp = item[0];
-            sender = item[1];
-            message = item[2];
-
-        } else if (item && typeof item === "object") {
-
-            sender = item.sender || item.from || item.username || "Unknown";
-            message = item.message != null ? item.message : item.text;
+            [timestamp, sender, message] = item;
+        } else if (item && typeof item === 'object') {
+            sender    = item.sender || item.from || item.username || 'Unknown';
+            message   = item.message != null ? item.message : item.text;
             timestamp = item.timestamp || item.time || item.created_at;
+        } else { return; }
 
-        } else {
+        if (message == null || message === '') return;
 
-            return;
+        const dateStr = formatDateDivider(timestamp);
+        if (dateStr && dateStr !== lastDate) {
+            appendDateDivider(msgs, dateStr);
+            lastDate = dateStr;
         }
 
-        if (message == null || message === "") return;
-
-        addMessage(
-            sender,
-            message,
-            sameUser(sender, currentUser),
-            timestamp
-        );
-    });
-}
-
-
-// ============================================================
-// SEND MESSAGE
-// ============================================================
-
-function sendMessage() {
-
-    const input =
-        $("messageInput");
-
-    if (!input) return;
-
-    const message =
-        input.value.trim();
-
-    if (!message) return;
-
-    if (!socket || !socket.connected) {
-
-        showToast(
-            "Not connected to server",
-            "error"
-        );
-
-        return;
-    }
-
-
-    // --------------------------------------------------------
-    // PRIVATE MESSAGE
-    // --------------------------------------------------------
-
-    if (
-        currentMode === "private" &&
-        currentChatUser
-    ) {
-
-        socket.emit(
-            "chat_message",
-            {
-                receiver: currentChatUser,
-                message: message
-            }
-        );
-
-        addMessage(
-            currentUser,
-            message,
-            true,
-            new Date().toISOString()
-        );
-
-        input.value = "";
-
-        return;
-    }
-
-
-    // --------------------------------------------------------
-    // GROUP MESSAGE
-    // --------------------------------------------------------
-
-    if (
-        currentMode === "group" &&
-        currentGroup
-    ) {
-
-        console.log(
-            "SENDING GROUP MESSAGE:",
-            currentGroup,
-            message
-        );
-
-        /*
-         * The message is sent as a single string, untouched.
-         * It is NEVER split on spaces. web_server.py builds:
-         *
-         * /groupmsg|groupname|message
-         *
-         * and sends it to server.py.
-         */
-
-        socket.emit(
-            "group_message",
-            {
-                group: currentGroup,
-                groupname: currentGroup,
-                message: message
-            }
-        );
-
-        /*
-         * Show our own message immediately.
-         * When the server broadcasts it back,
-         * the group_message handler ignores our duplicate.
-         */
-
-        addMessage(
-            currentUser,
-            message,
-            true,
-            new Date().toISOString()
-        );
-
-        input.value = "";
-
-        return;
-    }
-
-
-    showToast(
-        "Select a user or group first",
-        "error"
-    );
-}
-
-
-function handleMessageKey(event) {
-
-    if (event.key === "Enter") {
-
-        event.preventDefault();
-
-        sendMessage();
-    }
-}
-
-
-// ============================================================
-// ADD MESSAGE
-// ============================================================
-
-function addMessage(
-    sender,
-    message,
-    mine = false,
-    timestamp = null
-) {
-
-    const container =
-        $("messages");
-
-    if (!container) return;
-
-    const row =
-        document.createElement("div");
-
-    row.className =
-        `message-row ${mine ? "mine" : ""}`;
-
-    const bubble =
-        document.createElement("div");
-
-    bubble.className =
-        "message-bubble";
-
-    const time =
-        parseTimestamp(timestamp) || new Date();
-
-    bubble.innerHTML = `
-        <div class="message-sender">
-            ${escapeHtml(sender)}
-        </div>
-
-        <div class="message-text">
-            ${escapeHtml(message)}
-        </div>
-
-        <div class="message-time">
-            ${time.toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit"
-            })}
-        </div>
-    `;
-
-    row.appendChild(bubble);
-
-    container.appendChild(row);
-
-    const messagesContainer =
-        $("messagesContainer");
-
-    if (messagesContainer) {
-
-        messagesContainer.scrollTop =
-            messagesContainer.scrollHeight;
-    }
-
-    container.scrollTop =
-        container.scrollHeight;
-}
-
-
-// ============================================================
-// CLEAR CHAT
-// ============================================================
-
-function clearChatScreen() {
-
-    if ($("messages")) {
-        $("messages").innerHTML = "";
-    }
-
-    $("welcomeScreen")
-        ?.classList.remove("hidden");
-
-    $("messagesContainer")
-        ?.classList.add("hidden");
-
-    $("messageArea")
-        ?.classList.add("hidden");
-
-    if ($("chatTitle")) {
-        $("chatTitle").textContent =
-            "SecureChat";
-    }
-
-    if ($("chatSubtitle")) {
-        $("chatSubtitle").textContent =
-            "Select a conversation";
-    }
-
-    $("groupInfoBtn")
-        ?.classList.add("hidden");
-
-    renderGroups();
-    renderUsers();
-}
-
-
-// ============================================================
-// SIDEBAR
-// ============================================================
-
-function showUsers() {
-
-    $("usersPanel")
-        ?.classList.remove("hidden");
-
-    $("groupsPanel")
-        ?.classList.add("hidden");
-
-    updateSidebarTabs("users");
-
-    renderUsers();
-}
-
-
-function showGroups() {
-
-    $("groupsPanel")
-        ?.classList.remove("hidden");
-
-    $("usersPanel")
-        ?.classList.add("hidden");
-
-    updateSidebarTabs("groups");
-
-    loadGroups();
-}
-
-
-function updateSidebarTabs(active) {
-
-    document
-        .querySelectorAll(".sidebar-item")
-        .forEach(item => {
-
-            item.classList.remove("active");
-        });
-
-    if (active === "users") {
-
-        document
-            .querySelector(
-                '.sidebar-item[data-tab="users"]'
-            )
-            ?.classList.add("active");
-    }
-
-    if (active === "groups") {
-
-        document
-            .querySelector(
-                '.sidebar-item[data-tab="groups"]'
-            )
-            ?.classList.add("active");
-    }
-}
-
-
-// ============================================================
-// GROUPS
-// ============================================================
-
-function loadGroups() {
-
-    if (!socket || !socket.connected) {
-        return;
-    }
-
-    socket.emit("get_groups");
-}
-
-
-function getGroupName(group) {
-
-    if (typeof group === "string") {
-        return group;
-    }
-
-    if (group && typeof group === "object") {
-        return (
-            group.name ||
-            group.groupname ||
-            group.group ||
-            ""
-        );
-    }
-
-    return "";
-}
-
-
-function renderGroups() {
-
-    const container =
-        $("groupsList");
-
-    if (!container) return;
-
-    container.innerHTML = "";
-
-    if (groups.length === 0) {
-
-        container.innerHTML = `
-            <div class="empty-list">
-                No groups available
-            </div>
-        `;
-
-        return;
-    }
-
-    groups.forEach(group => {
-
-        const groupName =
-            getGroupName(group);
-
-        if (!groupName) return;
-
-        const button =
-            document.createElement("button");
-
-        button.type = "button";
-
-        button.className =
-            "group-item";
-
-        if (
-            currentMode === "group" &&
-            currentGroup === groupName
-        ) {
-
-            button.classList.add(
-                "selected"
-            );
-        }
-
-        button.innerHTML = `
-            <span>👥</span>
-            <span>${escapeHtml(groupName)}</span>
-        `;
-
-        button.onclick = () => {
-
-            openGroup(groupName);
-        };
-
-        container.appendChild(button);
+        addMessage(sender, message, sameUser(sender, currentUser), timestamp);
     });
 }
 
@@ -1690,124 +826,259 @@ function renderGroups() {
 // ============================================================
 
 function openGroup(group) {
-
     if (!group) return;
 
-    currentGroup = group;
+    currentGroup    = group;
     currentChatUser = null;
-    currentMode = "group";
+    currentMode     = 'group';
 
-    if ($("chatTitle")) {
-        $("chatTitle").textContent =
-            group;
+    const title    = $('chatTitle');
+    const subtitle = $('chatSubtitle');
+    const avatarEl = $('chatAvatarEl');
+
+    if (title)    title.textContent    = group;
+    if (subtitle) subtitle.textContent = 'Group chat · loading…';
+    if (avatarEl) {
+        avatarEl.textContent = '#';
+        avatarEl.className   = 'chat-avatar group-av';
     }
 
-    if ($("chatSubtitle")) {
-        $("chatSubtitle").textContent =
-            "Group conversation";
-    }
+    $('groupInfoBtn')     ?.classList.remove('hidden');
+    $('welcomeScreen')    ?.classList.add('hidden');
+    $('messagesContainer')?.classList.remove('hidden');
+    $('messageArea')      ?.classList.remove('hidden');
 
-    $("groupInfoBtn")
-        ?.classList.remove("hidden");
-
-    $("welcomeScreen")
-        ?.classList.add("hidden");
-
-    $("messagesContainer")
-        ?.classList.remove("hidden");
-
-    $("messageArea")
-        ?.classList.remove("hidden");
-
-    if ($("messages")) {
-        $("messages").innerHTML = "";
-    }
+    const msgs = $('messages');
+    if (msgs) msgs.innerHTML = '<div class="empty-list">Loading history…</div>';
 
     renderGroups();
     renderUsers();
 
-    // Show cached members right away while fresh data loads.
+    // Show cached members immediately while fresh data loads.
     if (groupMembers[group]) {
         renderGroupMembers(groupMembers[group]);
         populateAddMemberSelect(groupMembers[group]);
+        applyGroupPermissions();
     }
 
     if (socket && socket.connected) {
-
-        socket.emit(
-            "group_history",
-            {
-                group: group,
-                groupname: group
-            }
-        );
-
+        socket.emit('get_group_history', { group, groupname: group });
         loadGroupMembers(group);
     }
 }
 
 
 // ============================================================
-// GROUP HISTORY
+// SHOW GROUP HISTORY
 // ============================================================
 
 function showGroupHistory(data) {
+    if (currentMode !== 'group' || !currentGroup) return;
 
-    // Only render history into an open group conversation.
-    if (currentMode !== "group" || !currentGroup) {
+    const group = (!Array.isArray(data)) ? getGroupFromData(data) : '';
+    if (group && group !== currentGroup) return;
+
+    const msgs = $('messages');
+    if (!msgs) return;
+    msgs.innerHTML = '';
+
+    const items = getHistoryItems(data);
+
+    if (items.length === 0) {
+        msgs.innerHTML = '<div class="empty-list">No messages yet. Be the first!</div>';
         return;
     }
 
-    // Ignore history that belongs to a different group.
-    const group =
-        data && !Array.isArray(data)
-            ? getGroupFromData(data)
-            : "";
+    let lastDate = '';
 
-    if (group && group !== currentGroup) {
-        return;
-    }
-
-    const messages =
-        $("messages");
-
-    if (!messages) return;
-
-    messages.innerHTML = "";
-
-    getHistoryItems(data).forEach(item => {
-
-        let sender;
-        let message;
-        let timestamp;
+    items.forEach(item => {
+        let sender, message, timestamp;
 
         if (Array.isArray(item)) {
-
-            // Backend field order: timestamp, sender, message
-            timestamp = item[0];
-            sender = item[1];
-            message = item[2];
-
-        } else if (item && typeof item === "object") {
-
-            sender = item.sender || item.username || item.from || "Unknown";
-            message = item.message != null ? item.message : item.text;
+            [timestamp, sender, message] = item;
+        } else if (item && typeof item === 'object') {
+            sender    = item.sender || item.username || item.from || 'Unknown';
+            message   = item.message != null ? item.message : item.text;
             timestamp = item.timestamp || item.time || item.created_at;
+        } else { return; }
 
-        } else {
+        if (message == null || message === '') return;
 
-            return;
+        const dateStr = formatDateDivider(timestamp);
+        if (dateStr && dateStr !== lastDate) {
+            appendDateDivider(msgs, dateStr);
+            lastDate = dateStr;
         }
 
-        if (message == null || message === "") return;
-
-        addMessage(
-            sender,
-            message,
-            sameUser(sender, currentUser),
-            timestamp
-        );
+        addMessage(sender, message, sameUser(sender, currentUser), timestamp);
     });
+}
+
+
+// ============================================================
+// SEND MESSAGE
+// ============================================================
+
+function sendMessage() {
+    const input   = $('messageInput');
+    if (!input) return;
+
+    const message = input.value.trim();
+    if (!message) return;
+
+    if (!socket || !socket.connected) {
+        showToast('Not connected to server', 'error');
+        return;
+    }
+
+    if (currentMode === 'private' && currentChatUser) {
+        // web_server.py handler: chat_message -> /encrypted|receiver|payload
+        socket.emit('chat_message', {
+            receiver: currentChatUser,
+            message,
+        });
+        addMessage(currentUser, message, true, new Date().toISOString());
+        input.value = '';
+        return;
+    }
+
+    if (currentMode === 'group' && currentGroup) {
+        // web_server.py handler: group_message -> /groupmsg|group|text
+        socket.emit('group_message', {
+            group:     currentGroup,
+            groupname: currentGroup,
+            message,
+        });
+        addMessage(currentUser, message, true, new Date().toISOString());
+        input.value = '';
+        return;
+    }
+
+    showToast('Select a user or group first', 'error');
+}
+
+function handleMessageKey(event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        sendMessage();
+    }
+}
+
+
+// ============================================================
+// ADD MESSAGE BUBBLE
+// ============================================================
+
+function addMessage(sender, message, mine = false, timestamp = null) {
+    const container = $('messages');
+    if (!container) return;
+
+    // Remove the placeholder if present.
+    const placeholder = container.querySelector('.empty-list');
+    if (placeholder) placeholder.remove();
+
+    const row = document.createElement('div');
+    row.className = `message-row${mine ? ' mine' : ''}`;
+
+    // Small avatar for incoming messages
+    if (!mine) {
+        const av = document.createElement('div');
+        av.className   = 'msg-avatar';
+        av.textContent = sender.charAt(0).toUpperCase();
+        row.appendChild(av);
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+
+    const time = parseTimestamp(timestamp) || new Date();
+
+    bubble.innerHTML = `
+        <div class="message-sender">${escapeHtml(sender)}</div>
+        <div class="message-text">${escapeHtml(message)}</div>
+        <div class="message-time">${time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>`;
+
+    row.appendChild(bubble);
+    container.appendChild(row);
+
+    // Scroll to bottom
+    const mc = $('messagesContainer');
+    if (mc) mc.scrollTop = mc.scrollHeight;
+}
+
+
+// ============================================================
+// DATE DIVIDER HELPERS
+// ============================================================
+
+function formatDateDivider(timestamp) {
+    const d = parseTimestamp(timestamp);
+    if (!d) return '';
+    const today     = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+
+    if (d.toDateString() === today.toDateString())     return 'Today';
+    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+function appendDateDivider(container, text) {
+    const div = document.createElement('div');
+    div.className = 'date-divider';
+    div.innerHTML = `<span>${escapeHtml(text)}</span>`;
+    container.appendChild(div);
+}
+
+
+// ============================================================
+// CLEAR CHAT SCREEN
+// ============================================================
+
+function clearChatScreen() {
+    const msgs = $('messages');
+    if (msgs) msgs.innerHTML = '';
+
+    $('welcomeScreen')    ?.classList.remove('hidden');
+    $('messagesContainer')?.classList.add('hidden');
+    $('messageArea')      ?.classList.add('hidden');
+
+    const title    = $('chatTitle');
+    const subtitle = $('chatSubtitle');
+    const avatarEl = $('chatAvatarEl');
+
+    if (title)    title.textContent    = 'SecureChat';
+    if (subtitle) subtitle.textContent = 'Select a conversation';
+    if (avatarEl) { avatarEl.textContent = '💬'; avatarEl.className = 'chat-avatar'; }
+
+    $('groupInfoBtn')?.classList.add('hidden');
+
+    renderGroups();
+    renderUsers();
+}
+
+
+// ============================================================
+// SIDEBAR PANEL SWITCHING
+// ============================================================
+
+function showUsers() {
+    $('usersPanel') ?.classList.remove('hidden');
+    $('groupsPanel')?.classList.add('hidden');
+    _updateSidebarTabs('users');
+    renderUsers();
+}
+
+function showGroups() {
+    $('groupsPanel')?.classList.remove('hidden');
+    $('usersPanel') ?.classList.add('hidden');
+    _updateSidebarTabs('groups');
+    loadGroups();
+}
+
+function _updateSidebarTabs(active) {
+    document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+    document.querySelector(`.sidebar-item[data-tab="${active}"]`)?.classList.add('active');
 }
 
 
@@ -1816,137 +1087,76 @@ function showGroupHistory(data) {
 // ============================================================
 
 function openCreateGroup() {
-
-    const modal =
-        $("createGroupModal");
-
-    if (modal) {
-        modal.classList.remove("hidden");
-    }
-
-    const input =
-        $("groupNameInput");
-
-    if (input) {
-
-        input.value = "";
-        input.focus();
-    }
+    $('createGroupModal')?.classList.remove('hidden');
+    const input = $('groupNameInput');
+    if (input) { input.value = ''; input.focus(); }
 }
-
 
 function closeCreateGroup() {
-
-    $("createGroupModal")
-        ?.classList.add("hidden");
+    $('createGroupModal')?.classList.add('hidden');
 }
 
-
 function createGroup() {
-
-    const input =
-        $("groupNameInput");
-
+    const input = $('groupNameInput');
     if (!input) return;
 
-    const group =
-        input.value.trim();
+    const group = input.value.trim();
+    if (!group) { showToast('Enter a group name', 'error'); return; }
+    if (!socket || !socket.connected) { showToast('Not connected', 'error'); return; }
 
-    if (!group) {
-
-        showToast(
-            "Enter a group name",
-            "error"
-        );
-
-        return;
-    }
-
-    if (!socket || !socket.connected) {
-
-        showToast(
-            "Not connected to server",
-            "error"
-        );
-
-        return;
-    }
-
-    socket.emit(
-        "create_group",
-        {
-            groupname: group
-        }
-    );
-
+    // web_server.py: create_group -> /create groupname
+    socket.emit('create_group', { groupname: group });
     closeCreateGroup();
 }
 
 
 // ============================================================
-// JOIN GROUP
+// JOIN GROUP  (admin adds members; kept for completeness)
 // ============================================================
 
 function joinGroup(group) {
-
-    if (!socket || !socket.connected) {
-        return;
-    }
-
-    if (!group) return;
-
-    socket.emit(
-        "join_group",
-        {
-            groupname: group
-        }
-    );
+    if (!socket || !socket.connected || !group) return;
+    socket.emit('join_group', { groupname: group });
 }
 
 
 // ============================================================
-// GROUP INFO
+// GROUP INFO MODAL
 // ============================================================
 
+function isGroupAdmin(group) {
+    return !!group && sameUser(groupAdmins[group], currentUser);
+}
+
+/** Show/hide admin-only controls – only UI hint; backend enforces. */
+function applyGroupPermissions() {
+    const admin = isGroupAdmin(currentGroup);
+    $('addMemberSection')?.classList.toggle('hidden', !admin);
+    $('leaveSection')    ?.classList.toggle('hidden', admin);
+}
+
 function openGroupInfo() {
-
-    if (
-        !currentGroup ||
-        currentMode !== "group"
-    ) {
-
-        showToast(
-            "Select a group first",
-            "error"
-        );
-
+    if (!currentGroup || currentMode !== 'group') {
+        showToast('Select a group first', 'error');
         return;
     }
 
-    $("groupInfoModal")
-        ?.classList.remove("hidden");
+    $('groupInfoModal')?.classList.remove('hidden');
 
-    if ($("infoGroupName")) {
-
-        $("infoGroupName").textContent =
-            currentGroup;
-    }
+    const nameEl = $('infoGroupName');
+    if (nameEl) nameEl.textContent = currentGroup;
 
     if (groupMembers[currentGroup]) {
         renderGroupMembers(groupMembers[currentGroup]);
         populateAddMemberSelect(groupMembers[currentGroup]);
     }
 
-    loadGroupMembers(
-        currentGroup
-    );
+    applyGroupPermissions();
+    loadGroupMembers(currentGroup);
 }
 
-
 function closeGroupInfo() {
-
-    $("groupInfoModal")
-        ?.classList.add("hidden");
+    $('groupInfoModal')?.classList.add('hidden');
 }
 
 
@@ -1955,187 +1165,105 @@ function closeGroupInfo() {
 // ============================================================
 
 function loadGroupMembers(group) {
-
-    if (
-        !socket ||
-        !socket.connected ||
-        !group
-    ) {
-        return;
-    }
-
-    socket.emit(
-        "get_members",
-        {
-            group: group,
-            groupname: group
-        }
-    );
+    if (!socket || !socket.connected || !group) return;
+    // web_server.py: get_members -> /members groupname
+    socket.emit('get_members', { group, groupname: group });
 }
 
-
 function handleMembersData(data) {
+    const group   = getGroupFromData(data) || currentGroup;
+    const members = normalizeNames(Array.isArray(data) ? data : data?.members);
 
-    console.log(
-        "MEMBERS DATA:",
-        data
-    );
-
-    const group =
-        getGroupFromData(data) ||
-        currentGroup;
-
-    const members =
-        normalizeNames(
-            Array.isArray(data)
-                ? data
-                : data?.members
-        );
-
-    // groupMembers[groupName] = ["user1", "user2", ...]
     if (group) {
-
-        groupMembers[group] =
-            members;
+        groupMembers[group] = members;
+        if (data?.admin) groupAdmins[group] = data.admin;
     }
 
     // Only touch the visible UI if this is the open group.
-    if (group && group !== currentGroup) {
-        return;
+    if (group && group !== currentGroup) return;
+
+    renderGroupMembers(members);
+    populateAddMemberSelect(members);
+    applyGroupPermissions();
+
+    const count    = members.length;
+    const subtitle = $('chatSubtitle');
+    if (currentMode === 'group' && subtitle) {
+        subtitle.textContent = `${count} member${count === 1 ? '' : 's'}`;
     }
-
-    renderGroupMembers(
-        members
-    );
-
-    populateAddMemberSelect(
-        members
-    );
-
-    const label =
-        `${members.length} member${members.length === 1 ? "" : "s"}`;
-
-    if (
-        currentMode === "group" &&
-        $("chatSubtitle")
-    ) {
-
-        $("chatSubtitle").textContent =
-            label;
-    }
-
-    if ($("infoGroupMeta")) {
-
-        $("infoGroupMeta").textContent =
-            label;
-    }
+    _updateGroupMeta(count);
 }
 
+function _updateGroupMeta(count) {
+    const el = $('infoGroupMeta');
+    if (!el) return;
+    const admin = groupAdmins[currentGroup];
+    let text = `${count} member${count === 1 ? '' : 's'}`;
+    if (admin) text += ` · Admin: ${admin}`;
+    el.textContent = text;
+}
 
 function renderGroupMembers(members) {
-
-    const container =
-        $("groupMembersList");
-
+    const container = $('groupMembersList');
     if (!container) return;
 
-    container.innerHTML = "";
-
-    const names =
-        normalizeNames(members);
+    container.innerHTML = '';
+    const names = normalizeNames(members);
 
     if (names.length === 0) {
-
-        container.innerHTML = `
-            <div class="empty-list">
-                No members found
-            </div>
-        `;
-
+        container.innerHTML = '<div class="empty-list">No members found</div>';
         return;
     }
 
+    const adminName      = groupAdmins[currentGroup];
+    const viewerIsAdmin  = isGroupAdmin(currentGroup);
+
     names.forEach(username => {
+        const item   = document.createElement('div');
+        item.className = 'member-item';
 
-        const item =
-            document.createElement("div");
+        const av = document.createElement('div');
+        av.className   = 'member-avatar';
+        av.textContent = username.charAt(0).toUpperCase();
 
-        item.className =
-            "member-item";
+        const info = document.createElement('div');
+        info.className = 'member-info';
 
-        const avatar =
-            document.createElement("div");
+        const nameNode = document.createElement('strong');
+        nameNode.textContent = username;
+        info.appendChild(nameNode);
 
-        avatar.className =
-            "member-avatar";
-
-        avatar.textContent =
-            username
-                .charAt(0)
-                .toUpperCase();
-
-        const info =
-            document.createElement("div");
-
-        info.className =
-            "member-info";
-
-        const name =
-            document.createElement("strong");
-
-        name.textContent =
-            username;
-
-        info.appendChild(name);
+        if (sameUser(username, adminName)) {
+            const badge = document.createElement('span');
+            badge.className   = 'member-admin';
+            badge.textContent = 'Admin';
+            info.appendChild(badge);
+        }
 
         if (sameUser(username, currentUser)) {
-
-            const you =
-                document.createElement("span");
-
-            you.className =
-                "member-you";
-
-            you.textContent =
-                "You";
-
+            const you = document.createElement('span');
+            you.className   = 'member-you';
+            you.textContent = 'You';
             info.appendChild(you);
         }
 
-        item.appendChild(avatar);
+        item.appendChild(av);
         item.appendChild(info);
 
-        // Remove-member control (not shown for ourselves;
-        // use "leave group" for that).
-        if (!sameUser(username, currentUser)) {
-
-            const removeButton =
-                document.createElement("button");
-
-            removeButton.type = "button";
-
-            removeButton.className =
-                "member-remove";
-
-            removeButton.textContent =
-                "Remove";
-
-            removeButton.onclick = () => {
-
-                removeGroupMember(username);
-            };
-
-            item.appendChild(removeButton);
+        // Remove button: admin only, not for self or admin
+        if (viewerIsAdmin && !sameUser(username, adminName) && !sameUser(username, currentUser)) {
+            const removeBtn = document.createElement('button');
+            removeBtn.type      = 'button';
+            removeBtn.className = 'member-remove';
+            removeBtn.textContent = 'Remove';
+            removeBtn.onclick = () => removeGroupMember(username);
+            item.appendChild(removeBtn);
         }
 
         container.appendChild(item);
     });
 
-    if ($("infoGroupMeta")) {
-
-        $("infoGroupMeta").textContent =
-            `${names.length} member${names.length === 1 ? "" : "s"}`;
-    }
+    _updateGroupMeta(names.length);
 }
 
 
@@ -2143,75 +1271,31 @@ function renderGroupMembers(members) {
 // ADD MEMBER SELECT
 // ============================================================
 
-function populateAddMemberSelect(
-    existingMembers = null
-) {
-
-    const select =
-        $("addMemberSelect");
-
+function populateAddMemberSelect(existingMembers = null) {
+    const select = $('addMemberSelect');
     if (!select) return;
 
-    const previousValue =
-        select.value;
+    const prev = select.value;
+    select.innerHTML = '<option value="">Select a user…</option>';
 
-    select.innerHTML = "";
+    const memberNames = normalizeNames(existingMembers || groupMembers[currentGroup] || []);
+    // Prefer all registered users if known, fall back to online-only.
+    const candidates  = allUsers.length > 0 ? allUsers : onlineUsers;
 
-    const defaultOption =
-        document.createElement("option");
-
-    defaultOption.value = "";
-
-    defaultOption.textContent =
-        "Select a user";
-
-    select.appendChild(
-        defaultOption
-    );
-
-    const members =
-        existingMembers ||
-        groupMembers[currentGroup] ||
-        [];
-
-    const memberNames =
-        normalizeNames(members);
-
-    onlineUsers.forEach(user => {
-
+    candidates.forEach(user => {
         if (!user) return;
+        if (sameUser(user, currentUser)) return;
+        if (memberNames.some(m => sameUser(m, user))) return;
 
-        if (sameUser(user, currentUser)) {
-            return;
-        }
-
-        if (
-            memberNames.some(
-                name => sameUser(name, user)
-            )
-        ) {
-            return;
-        }
-
-        const option =
-            document.createElement("option");
-
-        option.value = user;
-
-        option.textContent = user;
-
-        select.appendChild(option);
+        const opt = document.createElement('option');
+        opt.value = user;
+        opt.textContent = user;
+        select.appendChild(opt);
     });
 
-    // Keep the previous selection if it is still available.
-    if (
-        previousValue &&
-        Array.from(select.options).some(
-            option => option.value === previousValue
-        )
-    ) {
-        select.value = previousValue;
-    }
+    // Restore previous selection if still valid
+    if (prev && Array.from(select.options).some(o => o.value === prev))
+        select.value = prev;
 }
 
 
@@ -2220,65 +1304,25 @@ function populateAddMemberSelect(
 // ============================================================
 
 function addSelectedMember() {
-
-    const select =
-        $("addMemberSelect");
-
+    const select = $('addMemberSelect');
     if (!select) return;
 
-    const username =
-        select.value;
-
-    if (!username) {
-
-        showToast(
-            "Select a user first",
-            "error"
-        );
-
-        return;
+    const username = select.value;
+    if (!username) { showToast('Select a user first', 'error'); return; }
+    if (!currentGroup) { showToast('No group selected', 'error'); return; }
+    if (!isGroupAdmin(currentGroup)) {
+        showToast('Only the group admin can add members', 'error'); return;
     }
+    if (!socket || !socket.connected) { showToast('Not connected', 'error'); return; }
 
-    if (!currentGroup) {
-
-        showToast(
-            "No group selected",
-            "error"
-        );
-
-        return;
-    }
-
-    if (
-        !socket ||
-        !socket.connected
-    ) {
-
-        showToast(
-            "Not connected to server",
-            "error"
-        );
-
-        return;
-    }
-
-    console.log(
-        "ADDING MEMBER:",
+    // web_server.py: add_member -> /addmember groupname username
+    socket.emit('add_member', {
+        group:    currentGroup,
+        groupname:currentGroup,
         username,
-        "TO:",
-        currentGroup
-    );
+    });
 
-    socket.emit(
-        "add_member",
-        {
-            group: currentGroup,
-            groupname: currentGroup,
-            username: username
-        }
-    );
-
-    select.value = "";
+    select.value = '';
 }
 
 
@@ -2286,43 +1330,20 @@ function addSelectedMember() {
 // REMOVE MEMBER
 // ============================================================
 
-function removeGroupMember(
-    username
-) {
-
-    if (!currentGroup) {
-
-        showToast(
-            "No group selected",
-            "error"
-        );
-
-        return;
+function removeGroupMember(username) {
+    if (!currentGroup) { showToast('No group selected', 'error'); return; }
+    if (!isGroupAdmin(currentGroup)) {
+        showToast('Only the group admin can remove members', 'error'); return;
     }
-
-    if (
-        !socket ||
-        !socket.connected
-    ) {
-
-        showToast(
-            "Not connected to server",
-            "error"
-        );
-
-        return;
-    }
-
+    if (!socket || !socket.connected) { showToast('Not connected', 'error'); return; }
     if (!username) return;
 
-    socket.emit(
-        "remove_member",
-        {
-            group: currentGroup,
-            groupname: currentGroup,
-            username: username
-        }
-    );
+    // web_server.py: remove_member -> /removemember groupname username
+    socket.emit('remove_member', {
+        group:    currentGroup,
+        groupname:currentGroup,
+        username,
+    });
 }
 
 
@@ -2331,48 +1352,14 @@ function removeGroupMember(
 // ============================================================
 
 function leaveGroup() {
-
-    if (!currentGroup) {
-
-        showToast(
-            "No group selected",
-            "error"
-        );
-
-        return;
+    if (!currentGroup) { showToast('No group selected', 'error'); return; }
+    if (isGroupAdmin(currentGroup)) {
+        showToast('The group admin cannot leave the group', 'error'); return;
     }
+    if (!socket || !socket.connected) { showToast('Not connected', 'error'); return; }
 
-    if (
-        !socket ||
-        !socket.connected
-    ) {
-
-        showToast(
-            "Not connected to server",
-            "error"
-        );
-
-        return;
-    }
-
-    const group =
-        currentGroup;
-
-    socket.emit(
-        "leave_group",
-        {
-            group: group,
-            groupname: group
-        }
-    );
-
-    delete groupMembers[group];
-
-    currentGroup = null;
-    currentMode = null;
-
-    clearChatScreen();
-    closeGroupInfo();
+    // web_server.py: leave_group -> /leave groupname
+    socket.emit('leave_group', { group: currentGroup, groupname: currentGroup });
 }
 
 
@@ -2381,21 +1368,19 @@ function leaveGroup() {
 // ============================================================
 
 function refreshData() {
+    if (!socket || !socket.connected) { showToast('Not connected', 'error'); return; }
 
-    if (
-        !socket ||
-        !socket.connected
-    ) {
-        return;
-    }
+    const btn = $('refreshButton');
+    if (btn) btn.classList.add('spin');
+    setTimeout(() => btn?.classList.remove('spin'), 600);
 
-    socket.emit("get_users");
-    socket.emit("get_groups");
-
-    if (currentGroup) {
-        loadGroupMembers(
-            currentGroup
-        );
+    socket.emit('get_users');
+    socket.emit('get_groups');
+    socket.emit('get_all_users');
+    if (currentGroup) loadGroupMembers(currentGroup);
+    if (currentMode === 'private' && currentChatUser) loadPrivateHistory(currentChatUser);
+    if (currentMode === 'group'   && currentGroup)    {
+        socket.emit('get_group_history', { group: currentGroup, groupname: currentGroup });
     }
 }
 
@@ -2405,260 +1390,110 @@ function refreshData() {
 // ============================================================
 
 function logout() {
-
-    localStorage.removeItem(
-        "securechat_username"
-    );
+    clearSession();
 
     if (socket) {
-
-        try {
-            socket.emit("logout");
-        } catch (error) {
-            console.error(error);
-        }
-
+        try { socket.emit('logout'); } catch (_) { /* ignore */ }
         socket.disconnect();
         socket = null;
     }
 
     authHandlersBound = false;
     chatHandlersBound = false;
+    currentUser = currentChatUser = currentGroup = currentMode = null;
 
-    currentUser = null;
-    currentChatUser = null;
-    currentGroup = null;
-    currentMode = null;
-
-    window.location.href = "/";
+    window.location.href = '/';
 }
 
 
 // ============================================================
-// GUARDED ACTIONS
-// (protects against double-firing if a button has both an
-//  inline onclick in the HTML and an event listener here)
+// GUARDED (debounced) VERSIONS
 // ============================================================
 
-const guardedLogin = guard(login);
-const guardedRegister = guard(registerUser);
+const guardedLogin       = guard(login);
+const guardedRegister    = guard(registerUser);
 const guardedCreateGroup = guard(createGroup);
-const guardedAddMember = guard(addSelectedMember);
-const guardedLeaveGroup = guard(leaveGroup);
-const guardedLogout = guard(logout);
+const guardedAddMember   = guard(addSelectedMember);
+const guardedLeaveGroup  = guard(leaveGroup);
+const guardedLogout      = guard(logout);
 
 
 // ============================================================
-// EVENT LISTENERS
+// DOM READY
 // ============================================================
 
-document.addEventListener(
-    "DOMContentLoaded",
-    () => {
+document.addEventListener('DOMContentLoaded', () => {
+    const isChatPage = window.location.pathname.startsWith('/chat');
 
-        /*
-         * IMPORTANT:
-         * Only initialize chat on /chat, and only the
-         * auth socket elsewhere. Exactly one socket is
-         * created per page.
-         */
-
-        const path =
-            window.location.pathname;
-
-        const isChatPage =
-            path === "/chat" ||
-            path === "/chat/";
-
-        if (isChatPage) {
-
-            initializeChat();
-
-        } else {
-
-            connectAuthSocket();
-        }
-
-
-        // ----------------------------------------------------
-        // LOGIN
-        // ----------------------------------------------------
-
-        $("loginButton")
-            ?.addEventListener(
-                "click",
-                guardedLogin
-            );
-
-
-        // ----------------------------------------------------
-        // REGISTER
-        // ----------------------------------------------------
-
-        $("registerButton")
-            ?.addEventListener(
-                "click",
-                guardedRegister
-            );
-
-
-        // ----------------------------------------------------
-        // LOGIN TAB
-        // ----------------------------------------------------
-
-        $("loginTab")
-            ?.addEventListener(
-                "click",
-                showLogin
-            );
-
-
-        // ----------------------------------------------------
-        // REGISTER TAB
-        // ----------------------------------------------------
-
-        $("registerTab")
-            ?.addEventListener(
-                "click",
-                showRegister
-            );
-
-
-        // ----------------------------------------------------
-        // SEND MESSAGE
-        // ----------------------------------------------------
-
-        $("sendButton")
-            ?.addEventListener(
-                "click",
-                sendMessage
-            );
-
-
-        // ----------------------------------------------------
-        // ENTER MESSAGE
-        // ----------------------------------------------------
-
-        $("messageInput")
-            ?.addEventListener(
-                "keydown",
-                handleMessageKey
-            );
-
-
-        // ----------------------------------------------------
-        // CREATE GROUP
-        // ----------------------------------------------------
-
-        $("createGroupButton")
-            ?.addEventListener(
-                "click",
-                guardedCreateGroup
-            );
-
-
-        // ----------------------------------------------------
-        // ADD MEMBER
-        // ----------------------------------------------------
-
-        $("addMemberButton")
-            ?.addEventListener(
-                "click",
-                guardedAddMember
-            );
-
-
-        // ----------------------------------------------------
-        // LEAVE GROUP
-        // ----------------------------------------------------
-
-        $("leaveGroupButton")
-            ?.addEventListener(
-                "click",
-                guardedLeaveGroup
-            );
-
-
-        // ----------------------------------------------------
-        // CLOSE GROUP INFO
-        // ----------------------------------------------------
-
-        $("closeGroupInfo")
-            ?.addEventListener(
-                "click",
-                closeGroupInfo
-            );
-
-
-        // ----------------------------------------------------
-        // GROUP INFO BUTTON
-        // ----------------------------------------------------
-
-        $("groupInfoBtn")
-            ?.addEventListener(
-                "click",
-                openGroupInfo
-            );
-
-
-        // ----------------------------------------------------
-        // LOGOUT
-        // ----------------------------------------------------
-
-        $("logoutButton")
-            ?.addEventListener(
-                "click",
-                guardedLogout
-            );
-
-
-        // ----------------------------------------------------
-        // REFRESH
-        // ----------------------------------------------------
-
-        $("refreshButton")
-            ?.addEventListener(
-                "click",
-                refreshData
-            );
+    if (isChatPage) {
+        initializeChat();
+    } else {
+        connectAuthSocket();
+        // Focus the username field on load
+        setTimeout(() => $('loginUsername')?.focus(), 100);
     }
-);
+
+    // Wire up elements that may exist on either page
+    $('loginButton')    ?.addEventListener('click', guardedLogin);
+    $('registerButton') ?.addEventListener('click', guardedRegister);
+    $('loginTab')       ?.addEventListener('click', showLogin);
+    $('registerTab')    ?.addEventListener('click', showRegister);
+
+    $('sendButton')     ?.addEventListener('click', sendMessage);
+    $('messageInput')   ?.addEventListener('keydown', handleMessageKey);
+
+    $('createGroupButton')?.addEventListener('click', guardedCreateGroup);
+    $('addMemberButton')  ?.addEventListener('click', guardedAddMember);
+    $('leaveGroupButton') ?.addEventListener('click', guardedLeaveGroup);
+
+    $('closeGroupInfo')   ?.addEventListener('click', closeGroupInfo);
+    $('groupInfoBtn')     ?.addEventListener('click', openGroupInfo);
+
+    $('logoutButton')     ?.addEventListener('click', guardedLogout);
+    $('refreshButton')    ?.addEventListener('click', refreshData);
+
+    // Close modals when clicking the backdrop
+    document.querySelectorAll('.modal').forEach(modal => {
+        modal.addEventListener('click', e => {
+            if (e.target === modal) {
+                modal.classList.add('hidden');
+            }
+        });
+    });
+});
 
 
 // ============================================================
-// MAKE FUNCTIONS AVAILABLE TO HTML
+// EXPOSE TO INLINE HTML HANDLERS
 // ============================================================
 
-window.login = guardedLogin;
+window.login        = guardedLogin;
 window.registerUser = guardedRegister;
 
-window.showLogin = showLogin;
+window.showLogin    = showLogin;
 window.showRegister = showRegister;
 
-window.sendMessage = sendMessage;
+window.sendMessage      = sendMessage;
 window.handleMessageKey = handleMessageKey;
 
-window.showUsers = showUsers;
+window.showUsers  = showUsers;
 window.showGroups = showGroups;
 
 window.openPrivateChat = openPrivateChat;
-window.openGroup = openGroup;
+window.openGroup       = openGroup;
 
-window.createGroup = guardedCreateGroup;
-window.openCreateGroup = openCreateGroup;
+window.openCreateGroup  = openCreateGroup;
 window.closeCreateGroup = closeCreateGroup;
+window.createGroup      = guardedCreateGroup;
 
 window.joinGroup = joinGroup;
 
-window.openGroupInfo = openGroupInfo;
+window.openGroupInfo  = openGroupInfo;
 window.closeGroupInfo = closeGroupInfo;
 
-window.addSelectedMember = guardedAddMember;
-
-window.removeGroupMember = removeGroupMember;
+window.addSelectedMember  = guardedAddMember;
+window.removeGroupMember  = removeGroupMember;
 
 window.leaveGroup = guardedLeaveGroup;
-
-window.logout = guardedLogout;
-
+window.logout     = guardedLogout;
 window.refreshData = refreshData;

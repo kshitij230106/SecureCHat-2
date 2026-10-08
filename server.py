@@ -200,9 +200,15 @@ def get_group_names():
 # =========================================================
 
 
-def send_group_list(client):
+def send_group_list(client, username=None):
 
-    names = get_group_names()
+    if username:
+
+        names = database.get_groups_for_user(username)
+
+    else:
+
+        names = get_group_names()
 
     if names:
 
@@ -730,9 +736,13 @@ def handle_group_members(username, group_name):
 
             return "ERROR|You are not a member"
 
+        # group[2] is the owner/admin field
+
+        admin = str(group[2]) if isinstance(group, (tuple, list)) and len(group) >= 3 else ""
+
         member_text = "|".join(members)
 
-        return f"MEMBERS|{group_name}|" f"{member_text}"
+        return f"MEMBERS|{group_name}|{admin}|{member_text}"
 
     except Exception as e:
 
@@ -1132,7 +1142,7 @@ def handle_client(client, address):
 
         send_user_list()
 
-        send_group_list(client)
+        send_group_list(client, username)
 
         send_pending_messages(username, client)
 
@@ -1174,7 +1184,19 @@ def handle_client(client, address):
 
             elif command == "/groups":
 
-                send_group_list(client)
+                send_group_list(client, username)
+
+            # =================================================
+
+            # ALL USERS (registered, for add-member dropdown)
+
+            # =================================================
+
+            elif command == "/allusers":
+
+                all_usernames = database.get_all_usernames()
+
+                send_message(client, "ALLUSERS|" + "|".join(all_usernames))
 
             # =================================================
 
@@ -1192,7 +1214,7 @@ def handle_client(client, address):
 
                 if result.startswith("GROUP_CREATED|"):
 
-                    send_group_list(client)
+                    send_group_list(client, username)
 
             # =================================================
 
@@ -1210,7 +1232,7 @@ def handle_client(client, address):
 
                 if result.startswith("JOINED|"):
 
-                    send_group_list(client)
+                    send_group_list(client, username)
 
             # =================================================
 
@@ -1285,7 +1307,7 @@ def handle_client(client, address):
 
                             send_message(current_clients[target_user], history_result)
 
-                        send_group_list(current_clients[target_user])
+                        send_group_list(current_clients[target_user], target_user)
 
                         send_message(
                             current_clients[target_user],
@@ -1358,7 +1380,7 @@ def handle_client(client, address):
 
                 if result.startswith("LEFT|"):
 
-                    send_group_list(client)
+                    send_group_list(client, username)
 
             # =================================================
 

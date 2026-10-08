@@ -2,688 +2,121 @@
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0">
-
-    <title>SecureChat</title>
-
-    <link
-        rel="stylesheet"
-        href="/static/style.css">
-
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description"
+    content="SecureChat – End-to-end encrypted private and group messaging over TCP.">
+  <title>SecureChat – Secure Messaging</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 
-<body class="chat-page">
+<body class="login-page">
 
-<div class="app">
+  <div class="auth-container">
 
-    <!-- =====================================================
-         SIDEBAR
-         ===================================================== -->
+    <!-- ── Brand ─────────────────────────────────────── -->
+    <div class="auth-brand">
+      <div class="auth-brand-icon">🔐</div>
+      <h1>SecureChat</h1>
+      <p>End-to-end encrypted · TCP Network · Private &amp; Group</p>
+    </div>
 
-    <aside class="sidebar">
+    <!-- ── Auth Card ──────────────────────────────────── -->
+    <div class="auth-card">
 
-        <!-- BRAND -->
+      <!-- Tabs -->
+      <div class="auth-tabs">
+        <button id="loginTab" class="tab-btn active" type="button"
+          onclick="showLogin()">Sign In</button>
+        <button id="registerTab" class="tab-btn" type="button"
+          onclick="showRegister()">Register</button>
+      </div>
 
-        <div class="sidebar-brand">
+      <!-- ── Login Form ──────────────────────────────── -->
+      <form id="loginForm" class="auth-form"
+        onsubmit="event.preventDefault(); login();">
 
-            <div class="brand-icon small">
-                🔐
-            </div>
-
-            <div>
-
-                <h2>
-                    SecureChat
-                </h2>
-
-                <span>
-                    TCP Network
-                </span>
-
-            </div>
-
+        <div class="field-group">
+          <label for="loginUsername">Username</label>
+          <input
+            type="text"
+            id="loginUsername"
+            placeholder="Enter your username"
+            autocomplete="username"
+            spellcheck="false"
+            required>
         </div>
 
-
-        <!-- CURRENT USER -->
-
-        <div class="current-user">
-
-            <div
-                class="avatar"
-                id="myAvatar">
-                U
-            </div>
-
-            <div class="user-info">
-
-                <strong id="currentUsername">
-                    User
-                </strong>
-
-                <span class="online-status">
-
-                    <i></i>
-
-                    Online
-
-                </span>
-
-            </div>
-
+        <div class="field-group">
+          <label for="loginPassword">Password</label>
+          <input
+            type="password"
+            id="loginPassword"
+            placeholder="Enter your password"
+            autocomplete="current-password"
+            required>
         </div>
 
+        <div id="loginMessage" class="auth-message"></div>
 
-        <!-- NAVIGATION -->
-
-        <div class="sidebar-section">
-
-            <div class="section-title">
-                Communication
-            </div>
-
-
-            <button
-                class="sidebar-item active"
-                type="button"
-                onclick="showUsers()">
-
-                <span>
-                    👤
-                </span>
-
-                <span>
-                    Users
-                </span>
-
-                <span
-                    id="onlineCount"
-                    class="count">
-                    0
-                </span>
-
-            </button>
-
-
-            <button
-                class="sidebar-item"
-                type="button"
-                onclick="showGroups()">
-
-                <span>
-                    👥
-                </span>
-
-                <span>
-                    Groups
-                </span>
-
-                <span
-                    id="groupCount"
-                    class="count">
-                    0
-                </span>
-
-            </button>
-
-        </div>
-
-
-        <!-- =====================================================
-             USERS
-             ===================================================== -->
-
-        <div
-            id="usersPanel"
-            class="sidebar-list">
-
-            <div class="list-heading">
-                Online Users
-            </div>
-
-            <div id="usersList">
-
-                <div class="empty-list">
-                    No users online
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- =====================================================
-             GROUPS
-             ===================================================== -->
-
-        <div
-            id="groupsPanel"
-            class="sidebar-list hidden">
-
-            <div class="list-heading">
-
-                <span>
-                    Groups
-                </span>
-
-                <button
-                    class="add-btn"
-                    type="button"
-                    onclick="openCreateGroup()">
-
-                    +
-
-                </button>
-
-            </div>
-
-
-            <div id="groupsList">
-
-                <div class="empty-list">
-                    No groups
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- =====================================================
-             NETWORK
-             ===================================================== -->
-
-        <div class="network-card">
-
-            <div class="network-header">
-
-                <span>
-                    NETWORK
-                </span>
-
-                <span class="network-live">
-                    LIVE
-                </span>
-
-            </div>
-
-
-            <div class="network-row">
-
-                <span>
-                    Status
-                </span>
-
-                <strong id="networkStatus">
-                    Connected
-                </strong>
-
-            </div>
-
-
-            <div class="network-row">
-
-                <span>
-                    Protocol
-                </span>
-
-                <strong>
-                    TCP
-                </strong>
-
-            </div>
-
-
-            <div class="network-row">
-
-                <span>
-                    Clients
-                </span>
-
-                <strong id="networkClients">
-                    0
-                </strong>
-
-            </div>
-
-        </div>
-
-
-        <!-- LOGOUT -->
-
-        <button
-            class="logout-btn"
-            type="button"
-            onclick="logout()">
-
-            <span>
-                ↪
-            </span>
-
-            Logout
-
+        <button id="loginButton" class="auth-submit" type="submit">
+          Sign In
         </button>
 
-    </aside>
-
-
-    <!-- =====================================================
-         MAIN CHAT AREA
-         ===================================================== -->
-
-    <main class="main">
-
-
-        <!-- =================================================
-             CHAT HEADER
-             ================================================= -->
-
-        <header class="chat-header">
-
-            <div
-                id="chatHeader"
-                class="chat-header-info">
-
-                <div class="chat-avatar">
-                    💬
-                </div>
-
-                <div>
-
-                    <h2 id="chatTitle">
-                        Select a user
-                    </h2>
-
-                    <p id="chatSubtitle">
-                        Choose someone to start chatting
-                    </p>
-
-                </div>
-
-            </div>
-
-
-            <div class="header-actions">
-
-                <!-- REFRESH -->
-
-                <button
-                    class="icon-btn"
-                    type="button"
-                    title="Refresh"
-                    onclick="refreshData()">
-
-                    ↻
-
-                </button>
-
-
-                <!-- GROUP INFO -->
-
-                <button
-                    id="groupInfoBtn"
-                    class="icon-btn hidden"
-                    type="button"
-                    title="Group information"
-                    onclick="openGroupInfo()">
-
-                    ⓘ
-
-                </button>
-
-            </div>
-
-        </header>
-
-
-        <!-- =================================================
-             WELCOME SCREEN
-             ================================================= -->
-
-        <div
-            id="welcomeScreen"
-            class="welcome-screen">
-
-            <div class="welcome-icon">
-                🔐
-            </div>
-
-
-            <h1>
-                SecureChat
-            </h1>
-
-
-            <p>
-                Select a user or group from the sidebar
-                to start a secure conversation.
-            </p>
-
-
-            <div class="feature-cards">
-
-
-                <!-- TCP -->
-
-                <div class="feature-card">
-
-                    <div>
-                        🌐
-                    </div>
-
-                    <strong>
-                        TCP Communication
-                    </strong>
-
-                    <span>
-                        Reliable client-server messaging
-                        using TCP sockets.
-                    </span>
-
-                </div>
-
-
-                <!-- MULTI CLIENT -->
-
-                <div class="feature-card">
-
-                    <div>
-                        👥
-                    </div>
-
-                    <strong>
-                        Multi-Client
-                    </strong>
-
-                    <span>
-                        Multiple users connected
-                        simultaneously.
-                    </span>
-
-                </div>
-
-
-                <!-- SECURITY -->
-
-                <div class="feature-card">
-
-                    <div>
-                        🔒
-                    </div>
-
-                    <strong>
-                        Secure
-                    </strong>
-
-                    <span>
-                        Authentication and encrypted
-                        communication.
-                    </span>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- =================================================
-             MESSAGES
-             ================================================= -->
-
-        <div
-            id="messagesContainer"
-            class="messages-container hidden">
-
-            <div id="messages">
-            </div>
-
-        </div>
-
-
-        <!-- =================================================
-             MESSAGE INPUT
-             ================================================= -->
-
-        <div
-            id="messageArea"
-            class="message-area hidden">
-
-            <div class="message-input-wrapper">
-
-                <input
-                    type="text"
-                    id="messageInput"
-                    placeholder="Type your message..."
-                    autocomplete="off"
-                    onkeydown="handleMessageKey(event)">
-
-
-                <button
-                    class="send-btn"
-                    type="button"
-                    onclick="sendMessage()">
-
-                    ➤
-
-                </button>
-
-            </div>
-
-
-            <div class="input-hint">
-                Press Enter to send
-            </div>
-
-        </div>
-
-    </main>
-
-</div>
-
-
-<!-- =========================================================
-     CREATE GROUP MODAL
-     ========================================================= -->
-
-<div
-    id="createGroupModal"
-    class="modal hidden">
-
-    <div class="modal-card">
-
-
-        <div class="modal-header">
-
-            <h2>
-                Create Group
-            </h2>
-
-            <button
-                type="button"
-                onclick="closeCreateGroup()">
-
-                ×
-
-            </button>
-
-        </div>
-
-
-        <p>
-            Create a new group for multiple users.
-        </p>
-
-
-        <input
-            id="groupNameInput"
+      </form>
+
+      <!-- ── Register Form ───────────────────────────── -->
+      <form id="registerForm" class="auth-form hidden"
+        onsubmit="event.preventDefault(); registerUser();">
+
+        <div class="field-group">
+          <label for="registerUsername">Choose Username</label>
+          <input
             type="text"
-            placeholder="Enter group name"
-            autocomplete="off">
-
-
-        <div class="modal-actions">
-
-
-            <button
-                class="secondary-btn"
-                type="button"
-                onclick="closeCreateGroup()">
-
-                Cancel
-
-            </button>
-
-
-            <button
-                class="primary-btn"
-                type="button"
-                onclick="createGroup()">
-
-                Create Group
-
-            </button>
-
+            id="registerUsername"
+            placeholder="Pick a unique username"
+            autocomplete="username"
+            spellcheck="false"
+            required>
         </div>
 
-    </div>
-
-</div>
-
-
-<!-- =========================================================
-     GROUP INFO MODAL
-     ========================================================= -->
-
-<div
-    id="groupInfoModal"
-    class="modal hidden">
-
-    <div class="modal-card group-info-card">
-
-
-        <!-- HEADER -->
-
-        <div class="modal-header">
-
-            <div>
-
-                <h2 id="infoGroupName">
-                    Group
-                </h2>
-
-                <p id="infoGroupMeta">
-                    Group members
-                </p>
-
-            </div>
-
-
-            <button
-                type="button"
-                onclick="closeGroupInfo()">
-
-                ×
-
-            </button>
-
+        <div class="field-group">
+          <label for="registerPassword">Create Password</label>
+          <input
+            type="password"
+            id="registerPassword"
+            placeholder="Create a strong password"
+            autocomplete="new-password"
+            required>
         </div>
 
+        <div id="registerMessage" class="auth-message"></div>
 
-        <!-- =================================================
-             ADD MEMBERS
-             ================================================= -->
+        <button id="registerButton" class="auth-submit" type="submit">
+          Create Account
+        </button>
 
-        <div class="add-member-section">
+      </form>
 
-            <h3>
-                Add Members
-            </h3>
+    </div><!-- /.auth-card -->
 
+    <!-- ── Footer note ────────────────────────────────── -->
+    <p class="auth-footer">
+      <span class="lock-icon">🔒</span>
+      Messages encrypted with RSA + AES
+    </p>
 
-            <div class="member-actions">
-
-                <select id="addMemberSelect">
-
-                    <option value="">
-                        Select a user
-                    </option>
-
-                </select>
+  </div><!-- /.auth-container -->
 
 
-                <button
-                    class="primary-btn"
-                    type="button"
-                    onclick="addSelectedMember()">
+  <!-- ── Toast ──────────────────────────────────────────── -->
+  <div id="toast" class="toast">
+    <span id="toastIcon">✓</span>
+    <span id="toastMessage">Success</span>
+  </div>
 
-                    + Add
-
-                </button>
-
-            </div>
-
-        </div>
-
-
-        <!-- =================================================
-             MEMBERS
-             ================================================= -->
-
-        <div class="members-section">
-
-            <h3>
-                Members
-            </h3>
-
-
-            <div
-                id="groupMembersList"
-                class="members-list">
-
-                <div class="empty-list">
-                    No members found
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-</div>
-
-
-<!-- =========================================================
-     TOAST
-     ========================================================= -->
-
-<div
-    id="toast"
-    class="toast">
-
-    <span id="toastIcon">
-        ✓
-    </span>
-
-    <span id="toastMessage">
-        Success
-    </span>
-
-</div>
-
-
-<!-- =========================================================
-     SCRIPT
-     ========================================================= -->
-
-<script src="/static/script.js"></script>
-
+  <script src="/static/script.js"></script>
 </body>
 
 </html>

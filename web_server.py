@@ -4,11 +4,17 @@ import threading
 
 import base64
 
+import hmac
+
+import secrets
+
+from datetime import datetime
+
+from urllib.parse import unquote
 
 from flask import Flask, render_template, request
 
 from flask_socketio import SocketIO
-
 
 import database
 
@@ -16,56 +22,45 @@ import key_manager
 
 import encryption
 
-
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from cryptography.hazmat.primitives import hashes
 
 # ============================================================
-
 # CONFIG
-
 # ============================================================
-
 
 TCP_HOST = "127.0.0.1"
 
 TCP_PORT = 5000
 
-
 WEB_HOST = "127.0.0.1"
 
 WEB_PORT = 8000
 
+# A browser that disappears (closed tab) keeps its TCP session for this
+# long so a page refresh / page change can re-attach. After that the TCP
+# session is closed and the user is shown as offline.
+
+GRACE_SECONDS = 20
+
+LOGIN_ATTACH_SECONDS = 60
+
+MAX_TEXT_LENGTH = 4000
+
+QUEUE_LIMIT = 500
+
+COALESCED_EVENTS = {"users", "groups", "all_users"}
 
 # ============================================================
-
 # FLASK
-
 # ============================================================
-
 
 app = Flask(
     __name__, static_folder="web", static_url_path="/static", template_folder="web"
 )
 
-
-# FIXED SOCKET.IO CONFIGURATION
-
-#
-
-# The previous configuration allowed Socket.IO to negotiate
-
-# transports automatically. In your setup this was causing:
-
-#
-
-# POST /socket.io/?EIO=4&transport=polling... 400
-
-#
-
-# Threading + polling keeps the browser connection stable.
-
+# Browser <-> web_server uses the WebSocket transport (simple-websocket).
 
 socketio = SocketIO(
     app,
@@ -77,31 +72,30 @@ socketio = SocketIO(
     ping_timeout=60,
 )
 
-
 # ============================================================
-
 # GLOBAL STATE
-
 # ============================================================
 
+web_clients = {}  # username -> TCP socket to server.py
 
-web_clients = {}
+browser_ids = {}  # username -> current Socket.IO sid (only while attached)
 
-browser_ids = {}
+session_tokens = {}  # username -> secret required to attach
 
+pending_events = {}  # username -> events waiting for the browser to attach
+
+history_requests = {}  # username -> queue of private-history targets
+
+cleanup_timers = {}  # username -> threading.Timer
 
 clients_lock = threading.Lock()
-
 
 tcp_send_locks = {}
 
 tcp_send_locks_lock = threading.Lock()
 
-
 # ============================================================
-
 # ROUTES
-
 # ============================================================
 
 
@@ -117,25 +111,11 @@ def chat_page():
     return render_template("chat.html")
 
 
-# IMPORTANT:
-
-#
-
-# DO NOT ADD:
-
-#
-
-# @app.route("/<path:path>")
-
-#
-
+# IMPORTANT: do NOT add a catch-all route such as "/<path:path>";
 # Flask-SocketIO must handle /socket.io/ itself.
 
-
 # ============================================================
-
-# TCP SEND
-
+# TCP SEND / RECEIVE
 # ============================================================
 
 
@@ -166,18 +146,11 @@ def tcp_send(client, message):
         return False
 
 
-# ============================================================
-
-# TCP RECEIVE
-
-# ============================================================
-
-
 def tcp_receive_line(client, buffer):
 
     try:
 
-        while "\n" not in buffer:
+        while b"\n" not in buffer:
 
             data = client.recv(8192)
 
@@ -185,11 +158,11 @@ def tcp_receive_line(client, buffer):
 
                 return None, buffer
 
-            buffer += data.decode("utf-8", errors="replace")
+            buffer += data
 
-        line, buffer = buffer.split("\n", 1)
+        line, buffer = buffer.split(b"\n", 1)
 
-        return line.strip(), buffer
+        return line.decode("utf-8", errors="replace").strip(), buffer
 
     except Exception as e:
 
@@ -199,21 +172,105 @@ def tcp_receive_line(client, buffer):
 
 
 # ============================================================
-
-# SOCKET.IO HELPERS
-
+# SESSION HELPERS
 # ============================================================
 
 
-def emit_to_user(username, event, data=None):
+def get_session(sid):
+
+    with clients_lock:
+
+        for username, browser_sid in browser_ids.items():
+
+            if browser_sid == sid:
+
+                return username, web_clients.get(username)
+
+    return None, None
+
+
+def get_username_from_sid(sid):
+
+    return get_session(sid)[0]
+
+
+def clean_arg(value):
+    """Strip a value coming from the browser; reject control characters
+    that could inject extra TCP commands."""
+
+    value = str(value if value is not None else "").strip()
+
+    if "\n" in value or "\r" in value:
+
+        return ""
+
+    return value
+
+
+def group_arg(data):
+
+    data = data or {}
+
+    return clean_arg(data.get("groupname") or data.get("group"))
+
+
+def emit_error(sid, message):
+
+    socketio.emit("error", {"message": message}, to=sid)
+
+
+def send_command(command, quiet=False):
+    """Send a TCP command on behalf of the browser that raised the event."""
+
+    sid = request.sid
+
+    username, tcp_client = get_session(sid)
+
+    if not username or not tcp_client:
+
+        if not quiet:
+
+            emit_error(sid, "Session not found. Please log in again.")
+
+        return False
+
+    return tcp_send(tcp_client, command)
+
+
+# ------------------------------------------------------------
+# Delivery to the browser. If the browser is not attached yet
+# (page change, short reconnect) the event is queued and flushed
+# on attach, and message ACKs are only sent once delivered.
+# ------------------------------------------------------------
+
+
+def deliver(username, event, data=None, ack_id=None):
 
     with clients_lock:
 
         sid = browser_ids.get(username)
 
-    if not sid:
+        tcp_client = web_clients.get(username)
 
-        return
+        if not sid:
+
+            if tcp_client is None:
+
+                return False
+
+            queue = pending_events.setdefault(username, [])
+
+            if event in COALESCED_EVENTS:
+
+                queue[:] = [item for item in queue if item[0] != event]
+
+            queue.append((event, data, ack_id))
+
+            if len(queue) > QUEUE_LIMIT:
+
+                del queue[0]
+
+            return False
 
     try:
 
@@ -223,24 +280,140 @@ def emit_to_user(username, event, data=None):
 
         print("[SOCKET EMIT ERROR]", e)
 
+    if ack_id and tcp_client:
 
-def get_username_from_sid(sid):
+        tcp_send(tcp_client, "/ack|" + ack_id)
+
+    return True
+
+
+def flush_pending(username):
 
     with clients_lock:
 
-        for username, browser_sid in browser_ids.items():
+        queue = pending_events.pop(username, [])
 
-            if browser_sid == sid:
+        sid = browser_ids.get(username)
 
-                return username
+        tcp_client = web_clients.get(username)
 
-    return None
+    if not sid:
+
+        return
+
+    for event, data, ack_id in queue:
+
+        try:
+
+            socketio.emit(event, data, to=sid)
+
+        except Exception as e:
+
+            print("[SOCKET EMIT ERROR]", e)
+
+        if ack_id and tcp_client:
+
+            tcp_send(tcp_client, "/ack|" + ack_id)
+
+
+def broadcast_users():
+
+    with clients_lock:
+
+        users = list(web_clients.keys())
+
+    for username in users:
+
+        deliver(username, "users", {"users": users})
+
+
+# ------------------------------------------------------------
+# Session lifetime
+# ------------------------------------------------------------
+
+
+def cancel_cleanup(username):
+
+    with clients_lock:
+
+        timer = cleanup_timers.pop(username, None)
+
+    if timer:
+
+        timer.cancel()
+
+
+def schedule_cleanup(username, delay):
+
+    cancel_cleanup(username)
+
+    timer = threading.Timer(delay, cleanup_if_detached, args=(username,))
+
+    timer.daemon = True
+
+    with clients_lock:
+
+        cleanup_timers[username] = timer
+
+    timer.start()
+
+
+def cleanup_if_detached(username):
+
+    with clients_lock:
+
+        cleanup_timers.pop(username, None)
+
+        attached = username in browser_ids
+
+    if not attached:
+
+        print("[SESSION EXPIRED]", username)
+
+        end_session(username)
+
+
+def end_session(username):
+
+    with clients_lock:
+
+        tcp_client = web_clients.pop(username, None)
+
+        browser_ids.pop(username, None)
+
+        session_tokens.pop(username, None)
+
+        pending_events.pop(username, None)
+
+        history_requests.pop(username, None)
+
+        timer = cleanup_timers.pop(username, None)
+
+    if timer:
+
+        timer.cancel()
+
+    if tcp_client:
+
+        try:
+
+            tcp_send(tcp_client, "/exit")
+
+            tcp_client.close()
+
+        except Exception:
+
+            pass
+
+        with tcp_send_locks_lock:
+
+            tcp_send_locks.pop(id(tcp_client), None)
+
+    broadcast_users()
 
 
 # ============================================================
-
-# AUTHENTICATION
-
+# AUTHENTICATION  ->  (success, message)
 # ============================================================
 
 
@@ -248,27 +421,25 @@ def authenticate_web_user(tcp_client, choice, username, password):
 
     try:
 
-        response, buffer = tcp_receive_line(tcp_client, "")
+        response, buffer = tcp_receive_line(tcp_client, b"")
 
         if response != "AUTH_REQUEST":
 
-            return False
+            return False, "Unexpected response from chat server"
 
-        tcp_send(tcp_client, choice)
+        for value, expected in ((choice, "USERNAME"), (username, "PASSWORD")):
 
-        response, buffer = tcp_receive_line(tcp_client, buffer)
+            tcp_send(tcp_client, value)
 
-        if response != "USERNAME":
+            response, buffer = tcp_receive_line(tcp_client, buffer)
 
-            return False
+            if response and response.startswith("AUTH_FAILED|"):
 
-        tcp_send(tcp_client, username)
+                return False, response.split("|", 1)[1]
 
-        response, buffer = tcp_receive_line(tcp_client, buffer)
+            if response != expected:
 
-        if response != "PASSWORD":
-
-            return False
+                return False, "Unexpected response from chat server"
 
         tcp_send(tcp_client, password)
 
@@ -276,23 +447,32 @@ def authenticate_web_user(tcp_client, choice, username, password):
 
         print("[AUTH]", response)
 
-        if not response:
+        if response is None:
 
-            return False
+            return False, "Chat server closed the connection"
 
         if response.startswith("AUTH_FAILED|"):
 
-            return False
+            return False, response.split("|", 1)[1]
 
         if not response.startswith("AUTH_SUCCESS|"):
 
-            return False
+            return False, "Unexpected response from chat server"
+
+        success_message = response.split("|", 1)[1]
+
+        # Registration ends here: server.py closes the connection
+        # after AUTH_SUCCESS and sends no READY handshake.
+
+        if choice == "REGISTER":
+
+            return True, success_message
 
         response, buffer = tcp_receive_line(tcp_client, buffer)
 
         if response != "READY_REQUEST":
 
-            return False
+            return False, "Handshake failed"
 
         tcp_send(tcp_client, "READY")
 
@@ -300,21 +480,19 @@ def authenticate_web_user(tcp_client, choice, username, password):
 
         if response != "READY_OK":
 
-            return False
+            return False, "Handshake failed"
 
-        return True
+        return True, success_message
 
     except Exception as e:
 
         print("[AUTH ERROR]", e)
 
-        return False
+        return False, "Authentication error"
 
 
 # ============================================================
-
 # ENCRYPTION KEYS
-
 # ============================================================
 
 
@@ -343,11 +521,7 @@ def register_public_key(username, tcp_client):
 
         command = "PUBLIC_KEY|" + username + "|" + public_key
 
-        if not tcp_send(tcp_client, command):
-
-            return False
-
-        return True
+        return tcp_send(tcp_client, command)
 
     except Exception as e:
 
@@ -357,42 +531,65 @@ def register_public_key(username, tcp_client):
 
 
 # ============================================================
-
-# ENCRYPT MESSAGE
-
+# ENCRYPT / DECRYPT
+#
+# Each private message is stored encrypted TWICE inside one string:
+# once for the receiver and once for the sender, so both people can
+# read the conversation in their history:
+#
+#     V2#<receiver blob>#S#<sender blob>
+#
+# A blob is the original format:  <RSA-wrapped key>||<ciphertext>
+# Messages stored in the old single-blob format still work (for the
+# receiver).
 # ============================================================
 
 
-def encrypt_for_user(sender, receiver, text):
+def _encrypt_blob(public_key_text, text):
+
+    public_key = key_manager.public_key_from_text(public_key_text)
+
+    symmetric_key = encryption.generate_key()
+
+    encrypted_message = encryption.encrypt_message(text, symmetric_key)
+
+    encrypted_key = public_key.encrypt(
+        symmetric_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+
+    encrypted_key_text = base64.b64encode(encrypted_key).decode("utf-8")
+
+    return encrypted_key_text + "||" + encrypted_message
+
+
+def encrypt_for_conversation(sender, receiver, text):
 
     try:
 
-        public_key_text = database.get_public_key(receiver)
+        receiver_key = database.get_public_key(receiver)
 
-        if not public_key_text:
+        if not receiver_key:
 
             print("[ENCRYPT ERROR] Public key not found:", receiver)
 
             return None
 
-        public_key = key_manager.public_key_from_text(public_key_text)
+        receiver_blob = _encrypt_blob(receiver_key, text)
 
-        symmetric_key = encryption.generate_key()
+        sender_key = database.get_public_key(sender)
 
-        encrypted_message = encryption.encrypt_message(text, symmetric_key)
+        if not sender_key:
 
-        encrypted_key = public_key.encrypt(
-            symmetric_key,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
+            return receiver_blob
 
-        encrypted_key_text = base64.b64encode(encrypted_key).decode("utf-8")
+        sender_blob = _encrypt_blob(sender_key, text)
 
-        return encrypted_key_text + "||" + encrypted_message
+        return "V2#" + receiver_blob + "#S#" + sender_blob
 
     except Exception as e:
 
@@ -401,18 +598,11 @@ def encrypt_for_user(sender, receiver, text):
         return None
 
 
-# ============================================================
-
-# DECRYPT MESSAGE
-
-# ============================================================
-
-
-def decrypt_message_for_user(username, encrypted_data):
+def _decrypt_blob(username, blob):
 
     try:
 
-        encrypted_key, encrypted_message = encrypted_data.split("||", 1)
+        encrypted_key, encrypted_message = blob.split("||", 1)
 
         private_key = key_manager.load_private_key(username)
 
@@ -436,16 +626,37 @@ def decrypt_message_for_user(username, encrypted_data):
         return None
 
 
+def decrypt_payload(username, payload, as_sender=False):
+
+    if payload.startswith("V2#"):
+
+        body = payload[3:]
+
+        if "#S#" not in body:
+
+            return None
+
+        receiver_blob, sender_blob = body.split("#S#", 1)
+
+        return _decrypt_blob(username, sender_blob if as_sender else receiver_blob)
+
+    # Old single-blob format: only the receiver can read it.
+
+    if as_sender:
+
+        return None
+
+    return _decrypt_blob(username, payload)
+
+
 # ============================================================
-
-# TCP RECEIVER
-
+# TCP RECEIVER (server.py -> browser)
 # ============================================================
 
 
 def receive_from_tcp(username, tcp_client):
 
-    buffer = ""
+    buffer = b""
 
     print("[TCP RECEIVER STARTED]", username)
 
@@ -463,13 +674,9 @@ def receive_from_tcp(username, tcp_client):
 
                 continue
 
-            print("[TCP -> WEB]", username, ":", message)
-
-            # =================================================
+            print("[TCP -> WEB]", username, ":", message[:200])
 
             # USERS
-
-            # =================================================
 
             if message.startswith("USERS|"):
 
@@ -477,13 +684,19 @@ def receive_from_tcp(username, tcp_client):
 
                 users = users_text.split("|") if users_text else []
 
-                emit_to_user(username, "users", {"users": users})
+                deliver(username, "users", {"users": users})
 
-            # =================================================
+            # ALL REGISTERED USERS
+
+            elif message.startswith("ALLUSERS|"):
+
+                users_text = message.split("|", 1)[1]
+
+                users = users_text.split("|") if users_text else []
+
+                deliver(username, "all_users", {"users": users})
 
             # GROUPS
-
-            # =================================================
 
             elif message.startswith("GROUPS|"):
 
@@ -491,13 +704,9 @@ def receive_from_tcp(username, tcp_client):
 
                 groups = groups_text.split("|") if groups_text else []
 
-                emit_to_user(username, "groups", {"groups": groups})
-
-            # =================================================
+                deliver(username, "groups", {"groups": groups})
 
             # PUBLIC KEY
-
-            # =================================================
 
             elif message.startswith("PUBLIC_KEY|"):
 
@@ -505,27 +714,15 @@ def receive_from_tcp(username, tcp_client):
 
                 if len(parts) == 3:
 
-                    emit_to_user(
+                    deliver(
                         username, "public_key", {"username": parts[1], "key": parts[2]}
                     )
 
-            # =================================================
-
-            # KEY SUCCESS
-
-            # =================================================
-
             elif message.startswith("KEY_SUCCESS|"):
 
-                emit_to_user(
-                    username, "key_success", {"message": message.split("|", 1)[1]}
-                )
-
-            # =================================================
+                deliver(username, "key_success", {"message": message.split("|", 1)[1]})
 
             # PRIVATE MESSAGE
-
-            # =================================================
 
             elif message.startswith("MESSAGE|"):
 
@@ -539,37 +736,33 @@ def receive_from_tcp(username, tcp_client):
 
                 message_id = parts[2]
 
-                encrypted_data = parts[3]
+                payload = parts[3]
 
-                decrypted_text = decrypt_message_for_user(username, encrypted_data)
+                text = decrypt_payload(username, payload)
 
-                if decrypted_text is None:
+                if text is None:
 
-                    emit_to_user(
-                        username, "error", {"message": "Could not decrypt message"}
+                    deliver(
+                        username,
+                        "error",
+                        {"message": "Could not decrypt a message from " + sender},
                     )
 
                     continue
 
-                emit_to_user(
+                deliver(
                     username,
                     "message",
                     {
                         "sender": sender,
                         "message_id": message_id,
-                        "message": decrypted_text,
+                        "message": text,
+                        "timestamp": datetime.now().isoformat(),
                     },
+                    ack_id=message_id if message_id != "0" else None,
                 )
 
-                if message_id != "0":
-
-                    tcp_send(tcp_client, "/ack|" + message_id)
-
-            # =================================================
-
             # PRIVATE HISTORY
-
-            # =================================================
 
             elif message.startswith("HISTORY|"):
 
@@ -579,9 +772,7 @@ def receive_from_tcp(username, tcp_client):
 
                 if history_text:
 
-                    records = history_text.split(";;")
-
-                    for record in records:
+                    for record in history_text.split(";;"):
 
                         try:
 
@@ -593,11 +784,7 @@ def receive_from_tcp(username, tcp_client):
 
                             timestamp = parts[0]
 
-                            users_part = parts[1]
-
-                            encrypted_data = parts[2]
-
-                            user_parts = users_part.split(" -> ")
+                            user_parts = parts[1].split(" -> ")
 
                             if len(user_parts) != 2:
 
@@ -607,19 +794,23 @@ def receive_from_tcp(username, tcp_client):
 
                             receiver = user_parts[1]
 
-                            decrypted_text = decrypt_message_for_user(
-                                username, encrypted_data
+                            text = decrypt_payload(
+                                username, parts[2], as_sender=(sender == username)
                             )
 
-                            if decrypted_text is None:
+                            if text is None:
 
-                                continue
+                                if sender != username:
+
+                                    continue
+
+                                text = "[Earlier message - not available to sender]"
 
                             history.append(
                                 {
                                     "sender": sender,
                                     "receiver": receiver,
-                                    "message": decrypted_text,
+                                    "message": text,
                                     "timestamp": timestamp,
                                 }
                             )
@@ -628,13 +819,15 @@ def receive_from_tcp(username, tcp_client):
 
                             print("[HISTORY ERROR]", e)
 
-                emit_to_user(username, "history", {"history": history})
+                with clients_lock:
 
-            # =================================================
+                    queue = history_requests.get(username) or []
+
+                    peer = queue.pop(0) if queue else ""
+
+                deliver(username, "history", {"with": peer, "history": history})
 
             # GROUP MESSAGE
-
-            # =================================================
 
             elif message.startswith("GROUP|"):
 
@@ -660,17 +853,18 @@ def receive_from_tcp(username, tcp_client):
 
                     continue
 
-                emit_to_user(
+                deliver(
                     username,
                     "group_message",
-                    {"group": group_name, "sender": sender, "message": text},
+                    {
+                        "group": group_name,
+                        "sender": sender,
+                        "message": text,
+                        "timestamp": datetime.now().isoformat(),
+                    },
                 )
 
-            # =================================================
-
             # GROUP HISTORY
-
-            # =================================================
 
             elif message.startswith("GROUP_HISTORY|"):
 
@@ -682,107 +876,59 @@ def receive_from_tcp(username, tcp_client):
 
                 if len(parts) == 3 and parts[2]:
 
-                    records = parts[2].split(";;")
+                    for record in parts[2].split(";;"):
 
-                    for record in records:
+                        fields = record.split(" | ", 2)
 
-                        try:
+                        if len(fields) != 3:
 
-                            fields = record.split(" | ", 2)
+                            continue
 
-                            if len(fields) != 3:
+                        history.append(
+                            {
+                                "timestamp": fields[0],
+                                "sender": fields[1],
+                                "message": unquote(fields[2]),
+                            }
+                        )
 
-                                continue
-
-                            history.append(
-                                {
-                                    "timestamp": fields[0],
-                                    "sender": fields[1],
-                                    "message": fields[2],
-                                }
-                            )
-
-                        except Exception as e:
-
-                            print("[GROUP HISTORY ERROR]", e)
-
-                emit_to_user(
+                deliver(
                     username, "group_history", {"group": group_name, "history": history}
                 )
 
-            # =================================================
-
-            # MEMBERS
-
-            # =================================================
+            # MEMBERS  ->  MEMBERS|group|admin|m1|m2...
 
             elif message.startswith("MEMBERS|"):
 
                 parts = message.split("|")
 
-                if len(parts) >= 2:
+                if len(parts) >= 3:
 
-                    group_name = parts[1]
-
-                    members = parts[2:]
-
-                    emit_to_user(
-                        username, "members", {"group": group_name, "members": members}
+                    deliver(
+                        username,
+                        "members",
+                        {
+                            "group": parts[1],
+                            "admin": parts[2],
+                            "members": [m for m in parts[3:] if m],
+                        },
                     )
-
-            # =================================================
-
-            # GROUP CREATED
-
-            # =================================================
 
             elif message.startswith("GROUP_CREATED|"):
 
-                group_name = message.split("|", 1)[1]
-
-                emit_to_user(username, "group_created", {"group": group_name})
-
-            # =================================================
-
-            # JOINED
-
-            # =================================================
+                deliver(username, "group_created", {"group": message.split("|", 1)[1]})
 
             elif message.startswith("JOINED|"):
 
-                group_name = message.split("|", 1)[1]
-
-                emit_to_user(username, "joined", {"group": group_name})
-
-            # =================================================
-
-            # LEFT
-
-            # =================================================
+                deliver(username, "joined", {"group": message.split("|", 1)[1]})
 
             elif message.startswith("LEFT|"):
 
-                group_name = message.split("|", 1)[1]
-
-                emit_to_user(username, "left", {"group": group_name})
-
-            # =================================================
-
-            # GROUP UPDATED
-
-            # =================================================
+                deliver(username, "left", {"group": message.split("|", 1)[1]})
 
             elif message.startswith("GROUP_UPDATED|"):
 
-                group_name = message.split("|", 1)[1]
-
-                emit_to_user(username, "group_updated", {"group": group_name})
-
-            # =================================================
-
-            # MEMBER ADDED
-
-            # =================================================
+                deliver(username, "group_updated", {"group": message.split("|", 1)[1]})
 
             elif message.startswith("MEMBER_ADDED|"):
 
@@ -790,17 +936,11 @@ def receive_from_tcp(username, tcp_client):
 
                 if len(parts) == 3:
 
-                    emit_to_user(
+                    deliver(
                         username,
                         "member_added",
                         {"group": parts[1], "username": parts[2]},
                     )
-
-            # =================================================
-
-            # MEMBER REMOVED
-
-            # =================================================
 
             elif message.startswith("MEMBER_REMOVED|"):
 
@@ -808,51 +948,27 @@ def receive_from_tcp(username, tcp_client):
 
                 if len(parts) == 3:
 
-                    emit_to_user(
+                    deliver(
                         username,
                         "member_removed",
                         {"group": parts[1], "username": parts[2]},
                     )
 
-            # =================================================
-
-            # SENT
-
-            # =================================================
-
             elif message == "SENT":
 
-                emit_to_user(username, "sent", {"success": True})
-
-            # =================================================
-
-            # SERVER MESSAGE
-
-            # =================================================
+                deliver(username, "sent", {"success": True})
 
             elif message.startswith("SERVER|"):
 
-                emit_to_user(username, "server", {"message": message.split("|", 1)[1]})
-
-            # =================================================
-
-            # ERROR
-
-            # =================================================
+                deliver(username, "server", {"message": message.split("|", 1)[1]})
 
             elif message.startswith("ERROR|"):
 
-                emit_to_user(username, "error", {"message": message.split("|", 1)[1]})
-
-            # =================================================
-
-            # SHUTDOWN
-
-            # =================================================
+                deliver(username, "error", {"message": message.split("|", 1)[1]})
 
             elif message == "SERVER_SHUTDOWN":
 
-                emit_to_user(username, "server_shutdown", {})
+                deliver(username, "server_shutdown", {})
 
                 break
 
@@ -866,31 +982,35 @@ def receive_from_tcp(username, tcp_client):
 
         with clients_lock:
 
-            if web_clients.get(username) is tcp_client:
+            mine = web_clients.get(username) is tcp_client
 
-                web_clients.pop(username, None)
+            sid = browser_ids.get(username) if mine else None
 
-            browser_ids.pop(username, None)
+        if mine:
 
-        with tcp_send_locks_lock:
+            if sid:
 
-            tcp_send_locks.pop(id(tcp_client), None)
+                socketio.emit(
+                    "session_closed",
+                    {"message": "Connection to the chat server was lost."},
+                    to=sid,
+                )
 
-        try:
+            end_session(username)
 
-            tcp_client.close()
+        else:
 
-        except Exception:
+            try:
 
-            pass
+                tcp_client.close()
 
-        broadcast_users()
+            except Exception:
+
+                pass
 
 
 # ============================================================
-
 # LOGIN
-
 # ============================================================
 
 
@@ -899,9 +1019,11 @@ def login(data):
 
     sid = request.sid
 
-    username = data.get("username", "").strip()
+    data = data or {}
 
-    password = data.get("password", "")
+    username = str(data.get("username", "")).strip()
+
+    password = str(data.get("password", ""))
 
     if not username or not password:
 
@@ -925,6 +1047,8 @@ def login(data):
 
         tcp_client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
+        tcp_client.settimeout(15)
+
         tcp_client.connect((TCP_HOST, TCP_PORT))
 
     except Exception as e:
@@ -937,17 +1061,17 @@ def login(data):
 
         return
 
-    success = authenticate_web_user(tcp_client, "LOGIN", username, password)
+    success, reason = authenticate_web_user(tcp_client, "LOGIN", username, password)
 
     if not success:
 
         tcp_client.close()
 
-        socketio.emit(
-            "login_error", {"message": "Invalid username or password"}, to=sid
-        )
+        socketio.emit("login_error", {"message": reason}, to=sid)
 
         return
+
+    tcp_client.settimeout(None)
 
     if not ensure_user_keys(username):
 
@@ -969,27 +1093,38 @@ def login(data):
 
         return
 
+    token = secrets.token_urlsafe(24)
+
     with clients_lock:
 
         web_clients[username] = tcp_client
 
-        browser_ids[username] = sid
+        session_tokens[username] = token
+
+        pending_events[username] = []
+
+        history_requests[username] = []
+
+        browser_ids.pop(username, None)
 
     print("[LOGIN SUCCESS]", username)
-
-    socketio.emit("login_success", {"username": username}, to=sid)
 
     threading.Thread(
         target=receive_from_tcp, args=(username, tcp_client), daemon=True
     ).start()
 
+    # The browser now moves from the login page to /chat and attaches
+    # with the token. If it never does, the session is closed.
+
+    schedule_cleanup(username, LOGIN_ATTACH_SECONDS)
+
+    socketio.emit("login_success", {"username": username, "token": token}, to=sid)
+
     broadcast_users()
 
 
 # ============================================================
-
 # REGISTER
-
 # ============================================================
 
 
@@ -998,9 +1133,11 @@ def register(data):
 
     sid = request.sid
 
-    username = data.get("username", "").strip()
+    data = data or {}
 
-    password = data.get("password", "")
+    username = str(data.get("username", "")).strip()
+
+    password = str(data.get("password", ""))
 
     if not username or not password:
 
@@ -1014,6 +1151,8 @@ def register(data):
 
         tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+        tcp_client.settimeout(15)
+
         tcp_client.connect((TCP_HOST, TCP_PORT))
 
     except Exception as e:
@@ -1026,7 +1165,7 @@ def register(data):
 
         return
 
-    success = authenticate_web_user(tcp_client, "REGISTER", username, password)
+    success, message = authenticate_web_user(tcp_client, "REGISTER", username, password)
 
     try:
 
@@ -1046,17 +1185,11 @@ def register(data):
 
     else:
 
-        socketio.emit(
-            "register_error",
-            {"message": "Registration failed. Username may already exist."},
-            to=sid,
-        )
+        socketio.emit("register_error", {"message": message}, to=sid)
 
 
 # ============================================================
-
-# ATTACH
-
+# ATTACH (browser <-> existing TCP session, token protected)
 # ============================================================
 
 
@@ -1065,501 +1198,319 @@ def attach(data):
 
     sid = request.sid
 
-    username = data.get("username", "").strip()
+    data = data or {}
 
-    if not username:
+    username = str(data.get("username", "")).strip()
 
-        return
+    token = str(data.get("token", ""))
 
     with clients_lock:
 
         tcp_client = web_clients.get(username)
 
-        if tcp_client is None:
+        expected = session_tokens.get(username)
 
-            socketio.emit(
-                "attach_error", {"message": "TCP connection not found"}, to=sid
-            )
+        valid = (
+            tcp_client is not None
+            and expected is not None
+            and hmac.compare_digest(expected.encode(), token.encode())
+        )
 
-            return
+        if valid:
 
-        browser_ids[username] = sid
+            browser_ids[username] = sid
+
+    if not valid:
+
+        socketio.emit(
+            "attach_error",
+            {"message": "Session expired. Please log in again."},
+            to=sid,
+        )
+
+        return
+
+    cancel_cleanup(username)
 
     socketio.emit("attach_success", {"username": username}, to=sid)
+
+    flush_pending(username)
 
     tcp_send(tcp_client, "/users")
 
     tcp_send(tcp_client, "/groups")
 
+    tcp_send(tcp_client, "/allusers")
+
 
 # ============================================================
-
 # PRIVATE MESSAGE
-
 # ============================================================
 
 
 @socketio.on("chat_message")
 def chat_message(data):
 
-    username = get_username_from_sid(request.sid)
+    data = data or {}
 
-    if not username:
+    receiver = clean_arg(data.get("receiver"))
 
-        return
+    text = str(data.get("message", ""))
 
-    receiver = data.get("receiver", "").strip()
-
-    text = data.get("message", "")
-
-    if not receiver or not text:
+    if not receiver or not text.strip():
 
         return
 
-    with clients_lock:
+    if len(text) > MAX_TEXT_LENGTH:
 
-        tcp_client = web_clients.get(username)
+        emit_error(request.sid, "Message is too long")
 
-    if not tcp_client:
+        return
 
-        socketio.emit(
-            "error", {"message": "TCP connection unavailable"}, to=request.sid
+    username, tcp_client = get_session(request.sid)
+
+    if not username or not tcp_client:
+
+        emit_error(request.sid, "Session not found. Please log in again.")
+
+        return
+
+    payload = encrypt_for_conversation(username, receiver, text)
+
+    if not payload:
+
+        emit_error(
+            request.sid,
+            "Could not encrypt message. Recipient public key may be unavailable.",
         )
 
         return
 
-    encrypted_data = encrypt_for_user(username, receiver, text)
-
-    if not encrypted_data:
-
-        socketio.emit(
-            "error",
-            {
-                "message": "Could not encrypt message. Recipient public key may be unavailable."
-            },
-            to=request.sid,
-        )
-
-        return
-
-    command = "/encrypted|" + receiver + "|" + encrypted_data
-
-    tcp_send(tcp_client, command)
+    tcp_send(tcp_client, "/encrypted|" + receiver + "|" + payload)
 
 
 # ============================================================
-
-# GET USERS
-
+# USERS / GROUPS
 # ============================================================
 
 
 @socketio.on("get_users")
-def get_users():
+def get_users(data=None):
 
-    username = get_username_from_sid(request.sid)
-
-    if not username:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/users")
+    send_command("/users", quiet=True)
 
 
-# ============================================================
+@socketio.on("get_all_users")
+def get_all_users(data=None):
 
-# GET GROUPS
-
-# ============================================================
+    send_command("/allusers", quiet=True)
 
 
 @socketio.on("get_groups")
-def get_groups():
+def get_groups(data=None):
 
-    username = get_username_from_sid(request.sid)
-
-    if not username:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/groups")
+    send_command("/groups", quiet=True)
 
 
 # ============================================================
-
 # PRIVATE HISTORY
-
 # ============================================================
 
 
 @socketio.on("get_history")
-def get_history(data):
+@socketio.on("history")
+def get_history(data=None):
 
-    username = get_username_from_sid(request.sid)
+    data = data or {}
 
-    if not username:
-
-        return
-
-    target = data.get("username", "").strip()
+    target = clean_arg(data.get("username"))
 
     if not target:
 
         return
 
+    username, tcp_client = get_session(request.sid)
+
+    if not username or not tcp_client:
+
+        return
+
     with clients_lock:
 
-        tcp_client = web_clients.get(username)
+        history_requests.setdefault(username, []).append(target)
 
-    if tcp_client:
-
-        tcp_send(tcp_client, "/history " + target)
+    tcp_send(tcp_client, "/history " + target)
 
 
 # ============================================================
-
 # PUBLIC KEY
-
 # ============================================================
 
 
 @socketio.on("get_public_key")
-def get_public_key(data):
+def get_public_key(data=None):
 
-    username = get_username_from_sid(request.sid)
+    target = clean_arg((data or {}).get("username"))
 
-    if not username:
+    if target:
 
-        return
-
-    target = data.get("username", "").strip()
-
-    if not target:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/key " + target)
+        send_command("/key " + target)
 
 
 # ============================================================
-
-# CREATE GROUP
-
+# GROUPS
 # ============================================================
 
 
 @socketio.on("create_group")
-def create_group(data):
+def create_group(data=None):
 
-    username = get_username_from_sid(request.sid)
+    groupname = group_arg(data)
 
-    if not username:
+    if groupname:
 
-        return
-
-    groupname = data.get("groupname", "").strip()
-
-    if not groupname:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/create " + groupname)
-
-
-# ============================================================
-
-# JOIN GROUP
-
-# ============================================================
+        send_command("/create " + groupname)
 
 
 @socketio.on("join_group")
-def join_group(data):
+def join_group(data=None):
 
-    username = get_username_from_sid(request.sid)
+    groupname = group_arg(data)
 
-    if not username:
+    if groupname:
 
-        return
-
-    groupname = data.get("groupname", "").strip()
-
-    if not groupname:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/join " + groupname)
-
-
-# ============================================================
-
-# GROUP MESSAGE
-
-# ============================================================
+        send_command("/join " + groupname)
 
 
 @socketio.on("group_message")
-def group_message(data):
+def group_message(data=None):
 
-    username = get_username_from_sid(request.sid)
+    data = data or {}
 
-    if not username:
+    groupname = group_arg(data)
 
-        return
+    text = str(data.get("message", ""))
 
-    groupname = data.get("groupname", "").strip()
+    # A newline would end the TCP line and be read as a second command.
 
-    text = data.get("message", "")
+    text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
 
     if not groupname or not text:
 
         return
 
-    with clients_lock:
+    if len(text) > MAX_TEXT_LENGTH:
 
-        tcp_client = web_clients.get(username)
-
-    if not tcp_client:
-
-        socketio.emit(
-            "error", {"message": "TCP connection unavailable"}, to=request.sid
-        )
+        emit_error(request.sid, "Message is too long")
 
         return
 
-    # Pipe protocol preserves spaces in message.
+    # Pipe protocol preserves spaces in the message.
 
     command = "/groupmsg|" + groupname + "|" + text
 
+    username, tcp_client = get_session(request.sid)
+
+    if not username or not tcp_client:
+
+        emit_error(request.sid, "Session not found. Please log in again.")
+
+        return
+
     if not tcp_send(tcp_client, command):
 
-        socketio.emit(
-            "error", {"message": "Could not send group message"}, to=request.sid
-        )
-
-
-# ============================================================
-
-# GROUP HISTORY
-
-# ============================================================
+        emit_error(request.sid, "Could not send group message")
 
 
 @socketio.on("get_group_history")
-def get_group_history(data):
+@socketio.on("group_history")
+def get_group_history(data=None):
 
-    username = get_username_from_sid(request.sid)
+    groupname = group_arg(data)
 
-    if not username:
+    if groupname:
 
-        return
-
-    groupname = data.get("groupname", "").strip()
-
-    if not groupname:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/grouphistory " + groupname)
-
-
-# ============================================================
-
-# GET MEMBERS
-
-# ============================================================
+        send_command("/grouphistory " + groupname)
 
 
 @socketio.on("get_members")
-def get_members(data):
+def get_members(data=None):
 
-    username = get_username_from_sid(request.sid)
+    groupname = group_arg(data)
 
-    if not username:
+    if groupname:
 
-        return
-
-    groupname = data.get("groupname", "").strip()
-
-    if not groupname:
-
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if tcp_client:
-
-        tcp_send(tcp_client, "/members " + groupname)
-
-
-# ============================================================
-
-# ADD MEMBER
-
-# ============================================================
+        send_command("/members " + groupname)
 
 
 @socketio.on("add_member")
-def add_member(data):
+def add_member(data=None):
 
-    username = get_username_from_sid(request.sid)
+    data = data or {}
 
-    if not username:
+    groupname = group_arg(data)
 
-        return
-
-    groupname = data.get("groupname", "").strip()
-
-    target_user = data.get("username", "").strip()
+    target_user = clean_arg(data.get("username"))
 
     if not groupname or not target_user:
 
-        socketio.emit(
-            "error", {"message": "Group name and username are required"}, to=request.sid
-        )
+        emit_error(request.sid, "Group name and username are required")
 
         return
 
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if not tcp_client:
-
-        socketio.emit(
-            "error", {"message": "TCP connection unavailable"}, to=request.sid
-        )
-
-        return
-
-    command = "/addmember " + groupname + " " + target_user
-
-    tcp_send(tcp_client, command)
-
-
-# ============================================================
-
-# REMOVE MEMBER
-
-# ============================================================
+    send_command("/addmember " + groupname + " " + target_user)
 
 
 @socketio.on("remove_member")
-def remove_member(data):
+def remove_member(data=None):
 
-    username = get_username_from_sid(request.sid)
+    data = data or {}
 
-    if not username:
+    groupname = group_arg(data)
 
-        return
-
-    groupname = data.get("groupname", "").strip()
-
-    target_user = data.get("username", "").strip()
+    target_user = clean_arg(data.get("username"))
 
     if not groupname or not target_user:
 
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-    if not tcp_client:
+        emit_error(request.sid, "Group name and username are required")
 
         return
 
-    command = "/removemember " + groupname + " " + target_user
+    send_command("/removemember " + groupname + " " + target_user)
 
-    tcp_send(tcp_client, command)
+
+@socketio.on("leave_group")
+def leave_group(data=None):
+
+    groupname = group_arg(data)
+
+    if groupname:
+
+        send_command("/leave " + groupname)
 
 
 # ============================================================
-
 # LOGOUT
-
 # ============================================================
 
 
 @socketio.on("logout")
-def logout():
+def logout(data=None):
 
     username = get_username_from_sid(request.sid)
 
-    if not username:
+    if username:
 
-        return
-
-    with clients_lock:
-
-        tcp_client = web_clients.get(username)
-
-        web_clients.pop(username, None)
-
-        browser_ids.pop(username, None)
-
-    if tcp_client:
-
-        try:
-
-            tcp_send(tcp_client, "/exit")
-
-            tcp_client.close()
-
-        except Exception:
-
-            pass
-
-    broadcast_users()
+        end_session(username)
 
 
 # ============================================================
-
 # BROWSER DISCONNECT
-
 # ============================================================
 
 
 @socketio.on("disconnect")
-def disconnect():
+def disconnect(*args):
 
     sid = request.sid
 
@@ -1579,29 +1530,15 @@ def disconnect():
 
             browser_ids.pop(username, None)
 
+    # Keep the TCP session briefly so a refresh can re-attach.
 
-# ============================================================
+    if username:
 
-# BROADCAST USERS
-
-# ============================================================
-
-
-def broadcast_users():
-
-    with clients_lock:
-
-        users = list(web_clients.keys())
-
-    for username in users:
-
-        emit_to_user(username, "users", {"users": users})
+        schedule_cleanup(username, GRACE_SECONDS)
 
 
 # ============================================================
-
 # MAIN
-
 # ============================================================
 
 
